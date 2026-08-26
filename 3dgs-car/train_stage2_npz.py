@@ -499,6 +499,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     parser.add_argument("--early-stop-checks", type=int, default=7)
     parser.add_argument("--no-densify", action="store_true")
     parser.add_argument(
+        "--record-optimization-time",
+        "--record_optimization_time",
+        dest="record_optimization_time",
+        action="store_true",
+        help=(
+            "Record CUDA-synchronized wall time for the Gaussian optimization "
+            "loop only in optimization_timing.json."
+        ),
+    )
+    parser.add_argument(
         "--monitor-gif-frames",
         "--monitor_gif_frames",
         dest="monitor_gif_frames",
@@ -606,7 +616,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     best_iteration = -1
     best_state: Optional[Dict[str, torch.Tensor]] = None
     stale_checks = 0
-    start_time = time.time()
+    post_initialization_start_time = time.perf_counter()
+    optimization_iterations_completed = 0
+    optimization_elapsed_seconds: Optional[float] = None
+    optimization_seconds_per_iteration: Optional[float] = None
+    optimization_timer_start: Optional[float] = None
+    if args.record_optimization_time:
+        torch.cuda.synchronize(device)
+        optimization_timer_start = time.perf_counter()
 
     for iteration in range(int(args.iterations)):
         gaussians.update_learning_rate(iteration)
@@ -635,6 +652,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         gaussians.optimizer.step()
         gaussians.optimizer.zero_grad(set_to_none=True)
+        optimization_iterations_completed = iteration + 1
 
         should_check = iteration == 0 or (iteration + 1) % int(args.log_every) == 0
         if should_check:
@@ -654,6 +672,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if int(args.early_stop_checks) > 0 and stale_checks >= int(args.early_stop_checks):
                     print(f"Early stopping; best checked iteration was {best_iteration + 1}.")
                     break
+
+    if optimization_timer_start is not None:
+        torch.cuda.synchronize(device)
+        optimization_elapsed_seconds = float(
+            time.perf_counter() - optimization_timer_start
+        )
+        if optimization_iterations_completed > 0:
+            optimization_seconds_per_iteration = float(
+                optimization_elapsed_seconds / optimization_iterations_completed
+            )
+        timing = {
+            "format": "3dgr_car_optimization_timing_v1",
+            "scope": "gaussian_optimization_loop_only",
+            "cuda_synchronized": True,
+            "sample_name": case.sample_name,
+            "view_indices": view_indices.tolist(),
+            "iterations_requested": int(args.iterations),
+            "iterations_completed": int(optimization_iterations_completed),
+            "early_stopped": bool(
+                optimization_iterations_completed < int(args.iterations)
+            ),
+            "elapsed_seconds": optimization_elapsed_seconds,
+            "seconds_per_iteration": optimization_seconds_per_iteration,
+            "volume_size": int(args.volume_size),
+            "num_initial_gaussians": int(args.num_init_gaussians),
+            "num_gaussians_after_optimization": int(gaussians.get_gaussians_num),
+            "densification_enabled": bool(not args.no_densify),
+            "gpu_index": int(args.gpu_index),
+            "gpu_name": torch.cuda.get_device_name(int(args.gpu_index)),
+            "pytorch_version": str(torch.__version__),
+            "pytorch_cuda_version": str(torch.version.cuda),
+        }
+        timing_path = output_dir / "optimization_timing.json"
+        timing_path.write_text(json.dumps(timing, indent=2), encoding="utf-8")
+        print(
+            "Optimization time: "
+            f"{optimization_elapsed_seconds:.6f} s for "
+            f"{optimization_iterations_completed} iterations "
+            f"({optimization_seconds_per_iteration or 0.0:.6f} s/iteration)"
+        )
+        print(f"Saved optimization timing: {timing_path}")
 
     if best_state is None:
         best_state = cpu_state_dict(gaussians)
@@ -754,7 +813,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "detector_pixel_spacing_m": float(case.detector_pixel_spacing_m),
         "best_checked_iteration": int(best_iteration + 1),
         "best_checked_loss": float(best_loss),
-        "elapsed_seconds": float(time.time() - start_time),
+        "post_initialization_pipeline_elapsed_seconds": float(
+            time.perf_counter() - post_initialization_start_time
+        ),
+        "record_optimization_time": bool(args.record_optimization_time),
+        "optimization_iterations_completed": int(
+            optimization_iterations_completed
+        ),
+        "optimization_elapsed_seconds": optimization_elapsed_seconds,
+        "optimization_seconds_per_iteration": optimization_seconds_per_iteration,
         "num_gaussians": int(gaussians.get_gaussians_num),
         "silhouette_gain": silhouette_gain,
         "volume_gif_frames": int(args.monitor_gif_frames),

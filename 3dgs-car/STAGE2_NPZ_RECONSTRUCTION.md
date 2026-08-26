@@ -33,6 +33,7 @@ python train_stage2_npz.py \
   --iterations 10 \
   --num-init-gaussians 1000 \
   --no-densify \
+  --record-optimization-time \
   --early-stop-checks 0
 ```
 
@@ -53,12 +54,28 @@ detector width projected back to isocentre; override it with
 - `input_view_reprojections.npz`: final reprojections on the two selected input views, their targets, raw line integrals, errors, and per-view metrics.
 - `input_view_reprojections.png`: target/reprojection/error montage for the two selected input views.
 - `novel_views.npz`: projections at all unselected stored views by default.
+- `optimization_timing.json`: CUDA-synchronized optimizer-loop wall time and run context, when `--record-optimization-time` is enabled.
 - `run_metadata.json`: selected views and reconstruction settings.
 
 The GIF defaults to an isovalue at 25% of the reconstructed volume's value
 range. Override it with `--volume-gif-isovalue VALUE`. Change the monitor timing
 with `--monitor-gif-frames` and `--monitor-gif-fps`, or disable this output with
 `--no-volume-gif`.
+
+## Optimization timing
+
+Pass `--record-optimization-time` to measure the complete Gaussian optimization
+loop with CUDA synchronization immediately before and after it. The reported
+wall time includes all iterations, ASTRA forward/backprojections, backward
+passes, optimizer steps, logging checks, best-state copies, and optional
+densification performed inside the loop. It excludes FDK/BP initialization,
+final-volume generation, reprojections, GIF rendering, and file output.
+
+The console reports total seconds and seconds per completed iteration, and the
+same values are saved in `optimization_timing.json` and `run_metadata.json`.
+Keep the iteration count, early-stopping settings, volume size, Gaussian count,
+densification settings, input views, and logging interval equal when comparing
+methods.
 
 ASTRA 2.4 or newer is strongly recommended because its direct projector API
 accepts PyTorch CUDA tensors. Older ASTRA versions use the implemented
