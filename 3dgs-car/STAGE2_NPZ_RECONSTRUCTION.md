@@ -53,7 +53,8 @@ detector width projected back to isocentre; override it with
 - `reconstructed_volume.gif`: prediction-only density isosurface, synchronized to the training monitor's 24-frame, 5-FPS, fixed-22-degree camera and shared GT/prediction framing.
 - `input_view_reprojections.npz`: final reprojections on the two selected input views, their targets, raw line integrals, errors, and per-view metrics.
 - `input_view_reprojections.png`: target/reprojection/error montage for the two selected input views.
-- `novel_views.npz`: projections at all unselected stored views by default.
+- `novel_views.npz`: projections, stored targets, errors, and per-view metrics at all unselected stored views by default.
+- `novel_view_reprojections.png`: target/reprojection/error montage for the requested novel views.
 - `optimization_timing.json`: CUDA-synchronized optimizer-loop wall time and run context, when `--record-optimization-time` is enabled.
 - `run_metadata.json`: selected views and reconstruction settings.
 

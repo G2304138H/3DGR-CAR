@@ -395,6 +395,77 @@ def save_volume(output_dir: Path, volume: torch.Tensor, volume_extent_m: float) 
         print("[WARN] nibabel is unavailable; saved only reconstructed_volume_zyx.npy.")
 
 
+def reprojection_metrics(
+    target: np.ndarray,
+    predictions: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    target_np = np.asarray(target, dtype=np.float32)
+    prediction_np = np.asarray(predictions, dtype=np.float32)
+    if target_np.shape != prediction_np.shape or target_np.ndim != 3:
+        raise ValueError(
+            "Reprojection targets and predictions must have matching [V,H,W] "
+            f"shapes, got {target_np.shape} and {prediction_np.shape}."
+        )
+    absolute_error = np.abs(prediction_np - target_np).astype(np.float32)
+    mse_per_view = np.mean(
+        (prediction_np - target_np) ** 2, axis=(1, 2)
+    ).astype(np.float32)
+    intersection = np.sum(prediction_np * target_np, axis=(1, 2))
+    dice_per_view = (
+        (2.0 * intersection + 1.0e-6)
+        / (
+            np.sum(prediction_np, axis=(1, 2))
+            + np.sum(target_np, axis=(1, 2))
+            + 1.0e-6
+        )
+    ).astype(np.float32)
+    return absolute_error, mse_per_view, dice_per_view
+
+
+def save_reprojection_montage(
+    *,
+    output_path: Path,
+    view_indices: np.ndarray,
+    target: np.ndarray,
+    predictions: np.ndarray,
+    absolute_error: np.ndarray,
+    mse_per_view: np.ndarray,
+    dice_per_view: np.ndarray,
+    target_title: str,
+    prediction_title: str,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print(
+            f"[WARN] matplotlib is unavailable; did not save {output_path.name}."
+        )
+        return
+
+    figure, axes = plt.subplots(
+        len(view_indices),
+        3,
+        figsize=(9.0, 3.0 * len(view_indices)),
+        squeeze=False,
+    )
+    column_titles = (target_title, prediction_title, "Absolute error")
+    for column, title in enumerate(column_titles):
+        axes[0, column].set_title(title)
+    for row, view_index in enumerate(view_indices):
+        images = (target[row], predictions[row], absolute_error[row])
+        for column, image in enumerate(images):
+            axes[row, column].imshow(image, cmap="gray", vmin=0.0, vmax=1.0)
+            axes[row, column].axis("off")
+        axes[row, 0].set_ylabel(
+            f"view {int(view_index)}\n"
+            f"MSE={float(mse_per_view[row]):.4g}\n"
+            f"soft Dice={float(dice_per_view[row]):.4f}"
+        )
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=160)
+    plt.close(figure)
+
+
 def save_input_view_reprojections(
     output_dir: Path,
     case: Stage2ProjectionCase,
@@ -406,17 +477,9 @@ def save_input_view_reprojections(
     target_np = target[0].detach().cpu().numpy().astype(np.float32)
     prediction_np = predictions[0].detach().cpu().numpy().astype(np.float32)
     line_integrals_np = line_integrals[0].detach().cpu().numpy().astype(np.float32)
-    absolute_error = np.abs(prediction_np - target_np).astype(np.float32)
-    mse_per_view = np.mean((prediction_np - target_np) ** 2, axis=(1, 2)).astype(np.float32)
-    intersection = np.sum(prediction_np * target_np, axis=(1, 2))
-    dice_per_view = (
-        (2.0 * intersection + 1.0e-6)
-        / (
-            np.sum(prediction_np, axis=(1, 2))
-            + np.sum(target_np, axis=(1, 2))
-            + 1.0e-6
-        )
-    ).astype(np.float32)
+    absolute_error, mse_per_view, dice_per_view = reprojection_metrics(
+        target_np, prediction_np
+    )
 
     np.savez_compressed(
         output_dir / "input_view_reprojections.npz",
@@ -431,36 +494,17 @@ def save_input_view_reprojections(
         soft_dice_per_view=dice_per_view,
     )
 
-    try:
-        import matplotlib.pyplot as plt
-
-        figure, axes = plt.subplots(
-            len(view_indices),
-            3,
-            figsize=(9.0, 3.0 * len(view_indices)),
-            squeeze=False,
-        )
-        column_titles = ("Input target", "Final reprojection", "Absolute error")
-        for column, title in enumerate(column_titles):
-            axes[0, column].set_title(title)
-        for row, view_index in enumerate(view_indices):
-            images = (target_np[row], prediction_np[row], absolute_error[row])
-            for column, image in enumerate(images):
-                axes[row, column].imshow(image, cmap="gray", vmin=0.0, vmax=1.0)
-                axes[row, column].axis("off")
-            axes[row, 0].set_ylabel(
-                f"view {int(view_index)}\n"
-                f"MSE={float(mse_per_view[row]):.4g}\n"
-                f"soft Dice={float(dice_per_view[row]):.4f}"
-            )
-        figure.tight_layout()
-        figure.savefig(output_dir / "input_view_reprojections.png", dpi=160)
-        plt.close(figure)
-    except ImportError:
-        print(
-            "[WARN] matplotlib is unavailable; saved input-view reprojections "
-            "as NPZ only."
-        )
+    save_reprojection_montage(
+        output_path=output_dir / "input_view_reprojections.png",
+        view_indices=view_indices,
+        target=target_np,
+        predictions=prediction_np,
+        absolute_error=absolute_error,
+        mse_per_view=mse_per_view,
+        dice_per_view=dice_per_view,
+        target_title="Input target",
+        prediction_title="Final reprojection",
+    )
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace, OptimizationParams]:
@@ -774,14 +818,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
             else:
                 novel_predictions = novel_line_integrals
+        novel_target_np = np.asarray(
+            case.images[novel_indices], dtype=np.float32
+        )
+        novel_prediction_np = (
+            novel_predictions[0].detach().cpu().numpy().astype(np.float32)
+        )
+        novel_line_integrals_np = (
+            novel_line_integrals[0].detach().cpu().numpy().astype(np.float32)
+        )
+        novel_absolute_error, novel_mse_per_view, novel_dice_per_view = (
+            reprojection_metrics(novel_target_np, novel_prediction_np)
+        )
         np.savez_compressed(
             output_dir / "novel_views.npz",
             view_indices=novel_indices.astype(np.int32),
             theta_deg=case.theta_deg[novel_indices],
             phi_deg=case.phi_deg[novel_indices],
-            predictions=novel_predictions[0].cpu().numpy(),
-            target_masks=case.images[novel_indices],
-            line_integrals=novel_line_integrals[0].cpu().numpy(),
+            predictions=novel_prediction_np,
+            target_masks=novel_target_np,
+            line_integrals=novel_line_integrals_np,
+            absolute_error=novel_absolute_error,
+            mse_per_view=novel_mse_per_view,
+            soft_dice_per_view=novel_dice_per_view,
+        )
+        save_reprojection_montage(
+            output_path=output_dir / "novel_view_reprojections.png",
+            view_indices=novel_indices,
+            target=novel_target_np,
+            predictions=novel_prediction_np,
+            absolute_error=novel_absolute_error,
+            mse_per_view=novel_mse_per_view,
+            dice_per_view=novel_dice_per_view,
+            target_title="Novel-view target",
+            prediction_title="Novel-view reprojection",
         )
         novel_projector.close()
 
