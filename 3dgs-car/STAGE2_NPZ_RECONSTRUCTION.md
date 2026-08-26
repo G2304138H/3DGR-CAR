@@ -20,7 +20,8 @@ python train_stage2_npz.py \
   --input /Users/renyu/Desktop/rca_0001.npz \
   --output-dir ./outputs/rca_0001_views_0_1 \
   --view-indices 0 1 \
-  --iterations 8000
+  --iterations 8000 \
+  --prediction-threshold-percentile 97
 ```
 
 For a short smoke run before committing to the full optimization:
@@ -58,11 +59,16 @@ detector width projected back to isocentre; override it with
 - `optimization_timing.json`: CUDA-synchronized optimizer-loop wall time and run context, when `--record-optimization-time` is enabled.
 - `run_metadata.json`: selected views and reconstruction settings.
 
-The GIF defaults to an isovalue at the 97th percentile of the reconstructed
-volume's strictly positive voxels. Override it with
-`--volume-gif-isovalue VALUE`. Change the monitor timing with
-`--monitor-gif-frames` and `--monitor-gif-fps`, or disable this output with
-`--no-volume-gif`.
+The GIF and evaluation use the same threshold interface. The single-case
+trainer defaults to an isovalue at the 97th percentile of the reconstructed
+volume's strictly positive voxels. Select either
+`--prediction-threshold VALUE` for a fixed raw-density threshold or
+`--prediction-threshold-percentile P` for a per-case positive-voxel percentile;
+the flags are mutually exclusive. The older `--volume-gif-isovalue VALUE` name
+remains an alias for `--prediction-threshold VALUE`. The requested mode and the
+effective numeric GIF isovalue are saved in `run_metadata.json`. Change the
+monitor timing with `--monitor-gif-frames` and `--monitor-gif-fps`, or disable
+this output with `--no-volume-gif`.
 
 ## Optimization timing
 
@@ -199,7 +205,7 @@ the same per-case isovalue rule used by `reconstructed_volume.gif`. The final
 JSON records both P97 and the resulting numeric threshold for every case. The
 binary GT mask defaults to `GT > 0` (`GT > 0.5` is equivalent for `{0,1}` GT).
 Use `--prediction-threshold VALUE` to replace P97 with an absolute threshold on
-the normalized prediction, or `--prediction-threshold-percentile P` to choose a
+the raw prediction, or `--prediction-threshold-percentile P` to choose a
 different positive-voxel percentile. Use `--ground-truth-threshold` to change
 the GT threshold. By default, other masked metrics use GT foreground voxels;
 `--metric-mask union` or `--metric-mask all` changes that region. If a GT NPZ

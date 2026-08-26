@@ -31,7 +31,10 @@ from stage2_npz_data import (
     load_stage2_projection_case,
     validate_view_indices,
 )
-from volume_gif import save_reconstructed_volume_gif
+from volume_gif import (
+    DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE,
+    save_reconstructed_volume_gif,
+)
 
 
 def create_grid_3d(depth: int, height: int, width: int, device: torch.device) -> torch.Tensor:
@@ -573,13 +576,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         type=int,
         default=5,
     )
-    parser.add_argument(
+    prediction_threshold_group = parser.add_mutually_exclusive_group()
+    prediction_threshold_group.add_argument(
+        "--prediction-threshold",
         "--volume-gif-isovalue",
+        dest="prediction_threshold",
         type=float,
         default=None,
         help=(
-            "Density isovalue for reconstructed_volume.gif. The default is the "
-            "97th percentile of strictly positive final-volume voxels."
+            "Fixed raw-density foreground threshold and GIF isovalue. "
+            "--volume-gif-isovalue is retained as a compatible alias."
+        ),
+    )
+    prediction_threshold_group.add_argument(
+        "--prediction-threshold-percentile",
+        type=float,
+        default=None,
+        help=(
+            "Per-case percentile of strictly positive final-volume voxels used "
+            "as the foreground threshold and GIF isovalue (default: P97)."
         ),
     )
     parser.add_argument("--no-volume-gif", action="store_true")
@@ -593,7 +608,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         ),
     )
     parser.add_argument("--gpu-index", type=int, default=0)
-    return parser.parse_args(argv), optimization
+    args = parser.parse_args(argv)
+    if args.prediction_threshold is None and args.prediction_threshold_percentile is None:
+        args.prediction_threshold_percentile = float(
+            DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
+        )
+    if (
+        args.prediction_threshold_percentile is not None
+        and not 0.0 <= args.prediction_threshold_percentile < 100.0
+    ):
+        parser.error("--prediction-threshold-percentile must be in [0, 100).")
+    return args, optimization
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -893,9 +918,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             out_path=volume_gif_path,
             num_frames=int(args.monitor_gif_frames),
             fps=int(args.monitor_gif_fps),
-            isovalue=args.volume_gif_isovalue,
+            isovalue=args.prediction_threshold,
+            positive_percentile=(
+                DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
+                if args.prediction_threshold_percentile is None
+                else args.prediction_threshold_percentile
+            ),
         )
-        print(f"Saved reconstructed-volume GIF: {volume_gif_path}")
+        threshold_description = (
+            f"fixed={float(args.prediction_threshold):.7g}"
+            if args.prediction_threshold is not None
+            else f"P{float(args.prediction_threshold_percentile):g}"
+        )
+        print(
+            f"Saved reconstructed-volume GIF: {volume_gif_path} "
+            f"({threshold_description}, effective isovalue="
+            f"{float(volume_gif_isovalue):.7g})"
+        )
 
     metadata = {
         "sample_name": case.sample_name,
@@ -926,6 +965,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "silhouette_gain": silhouette_gain,
         "volume_gif_frames": int(args.monitor_gif_frames),
         "volume_gif_fps": int(args.monitor_gif_fps),
+        "prediction_threshold": args.prediction_threshold,
+        "prediction_threshold_percentile": args.prediction_threshold_percentile,
         "volume_gif_isovalue": volume_gif_isovalue,
     }
     (output_dir / "run_metadata.json").write_text(

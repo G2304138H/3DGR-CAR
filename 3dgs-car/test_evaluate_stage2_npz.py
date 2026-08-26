@@ -22,6 +22,7 @@ from evaluate_stage2_npz import (
     structural_similarity_3d,
     translate_volume_zyx,
 )
+from volume_gif import resolve_volume_isovalue
 
 
 class SplitLoadingTests(unittest.TestCase):
@@ -45,7 +46,10 @@ class SplitLoadingTests(unittest.TestCase):
             split = root / "split.json"
             split.write_text(json.dumps({"test": ["rca_0001"]}), encoding="utf-8")
 
-            def fake_reconstruction(_script, _projection, case_output, _args):
+            received_training_args = []
+
+            def fake_reconstruction(_script, _projection, case_output, training_args):
+                received_training_args.extend(training_args)
                 np.save(case_output / "reconstructed_volume_zyx.npy", volume)
                 (case_output / "optimization_timing.json").write_text(
                     json.dumps(
@@ -91,6 +95,11 @@ class SplitLoadingTests(unittest.TestCase):
                 12.5,
             )
             self.assertTrue(results["cases"][0]["case_cache_removed"])
+            self.assertIn("--prediction-threshold-percentile", received_training_args)
+            percentile_index = received_training_args.index(
+                "--prediction-threshold-percentile"
+            )
+            self.assertEqual(received_training_args[percentile_index + 1], "97.0")
             self.assertGreater(
                 results["summary"]["timing"]["average_case_seconds"],
                 0.0,
@@ -194,6 +203,15 @@ class MetricTests(unittest.TestCase):
         threshold = positive_percentile_threshold(volume, 97.0)
         self.assertLess(threshold, 1.0)
         self.assertEqual(np.count_nonzero(volume > threshold), 27)
+
+    def test_gif_resolver_accepts_fixed_zero_or_custom_percentile(self):
+        volume = np.zeros((9, 9, 9), dtype=np.float32)
+        volume.reshape(-1)[:100] = np.arange(1, 101, dtype=np.float32)
+        fixed = resolve_volume_isovalue(volume, isovalue=0.0)
+        percentile = resolve_volume_isovalue(volume, positive_percentile=90.0)
+        self.assertGreater(fixed, 0.0)
+        self.assertLess(fixed, 1.0)
+        self.assertAlmostEqual(percentile, 90.1, places=1)
 
     def test_imagecas_vol_and_spacing_are_loaded_as_physical_xyz(self):
         with tempfile.TemporaryDirectory() as directory:

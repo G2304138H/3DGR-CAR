@@ -19,6 +19,67 @@ MONITOR_SURFACE_CIRCLE_POINTS = 24
 DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE = 97.0
 
 
+def resolve_volume_isovalue(
+    volume_zyx: np.ndarray,
+    *,
+    isovalue: Optional[float] = None,
+    positive_percentile: float = DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE,
+) -> float:
+    """Resolve a fixed or positive-percentile threshold for the volume GIF."""
+    volume = np.asarray(volume_zyx, dtype=np.float32)
+    if volume.ndim != 3 or min(volume.shape) < 2:
+        raise ValueError(f"Expected a 3D volume with dimensions >=2, got {volume.shape}.")
+    volume = np.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0)
+    value_min = float(volume.min())
+    value_max = float(volume.max())
+    if value_max <= value_min:
+        raise ValueError("Cannot render an isosurface from a constant volume.")
+
+    if isovalue is not None:
+        level = float(isovalue)
+        if not value_min <= level <= value_max:
+            raise ValueError(
+                f"Fixed volume GIF threshold {level:.7g} is outside the "
+                f"prediction range [{value_min:.7g}, {value_max:.7g}]."
+            )
+    else:
+        positive_percentile = float(positive_percentile)
+        if not 0.0 <= positive_percentile < 100.0:
+            raise ValueError(
+                "Positive-voxel percentile must be in [0, 100), got "
+                f"{positive_percentile}."
+            )
+        positive = volume[volume > 0.0]
+        if positive.size == 0:
+            raise ValueError(
+                "Cannot select the GIF isovalue because the volume has no "
+                "positive voxels."
+            )
+        level = float(np.percentile(positive, positive_percentile))
+
+    # Marching cubes requires an interior level. Preserve endpoint threshold
+    # semantics using the closest representable float32 value inside the range.
+    level = max(
+        level,
+        float(np.nextafter(np.float32(value_min), np.float32(value_max))),
+    )
+    level = min(
+        level,
+        float(np.nextafter(np.float32(value_max), np.float32(value_min))),
+    )
+    if not value_min < level < value_max:
+        mode = (
+            f"fixed threshold {float(isovalue):.7g}"
+            if isovalue is not None
+            else f"positive-voxel P{positive_percentile:g}"
+        )
+        raise ValueError(
+            f"Volume GIF {mode} does not fall inside the prediction range "
+            f"({value_min:.7g}, {value_max:.7g})."
+        )
+    return float(level)
+
+
 def _set_equal_3d_axes(ax: Any, points: np.ndarray) -> None:
     """Copy the monitor overlay's equal-axis calculation exactly."""
     pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
@@ -204,6 +265,7 @@ def _extract_volume_isosurface(
     volume_zyx: np.ndarray,
     volume_extent_m: float,
     isovalue: Optional[float],
+    positive_percentile: float = DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     try:
         from skimage import measure
@@ -217,31 +279,11 @@ def _extract_volume_isosurface(
     if volume.ndim != 3 or min(volume.shape) < 2:
         raise ValueError(f"Expected a 3D volume with dimensions >=2, got {volume.shape}.")
     volume = np.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0)
-    value_min = float(volume.min())
-    value_max = float(volume.max())
-    if value_max <= value_min:
-        raise ValueError("Cannot render an isosurface from a constant volume.")
-    if isovalue is not None:
-        level = float(isovalue)
-    else:
-        positive = volume[volume > 0.0]
-        if positive.size == 0:
-            raise ValueError(
-                "Cannot select the default GIF isovalue because the volume has "
-                "no positive voxels."
-            )
-        level = float(
-            np.percentile(positive, DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE)
-        )
-        # A very sparse or quantized volume can place P97 exactly at an endpoint,
-        # while marching_cubes requires a strictly interior level.
-        level = max(level, float(np.nextafter(value_min, value_max)))
-        level = min(level, float(np.nextafter(value_max, value_min)))
-    if not value_min < level < value_max:
-        raise ValueError(
-            f"Volume GIF isovalue must be inside ({value_min:.7g}, {value_max:.7g}), "
-            f"got {level:.7g}."
-        )
+    level = resolve_volume_isovalue(
+        volume,
+        isovalue=isovalue,
+        positive_percentile=positive_percentile,
+    )
 
     vertices_zyx, faces, _, _ = measure.marching_cubes(
         volume,
@@ -274,6 +316,7 @@ def save_reconstructed_volume_gif(
     num_frames: int = 24,
     fps: int = 5,
     isovalue: Optional[float] = None,
+    positive_percentile: float = DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE,
     title: str = "Reconstructed volume",
 ) -> float:
     """Save the prediction-only volume GIF with overlay-synchronized framing."""
@@ -295,6 +338,7 @@ def save_reconstructed_volume_gif(
         volume_zyx=volume_zyx,
         volume_extent_m=float(volume_extent_m),
         isovalue=isovalue,
+        positive_percentile=positive_percentile,
     )
     _, pred_surfs, points_for_axes = _center_surface_overlay(
         gt_surfs_raw,

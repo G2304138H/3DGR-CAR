@@ -25,7 +25,10 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from volume_gif import DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
+from volume_gif import (
+    DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE,
+    resolve_volume_isovalue,
+)
 
 
 VOLUME_KEY_CANDIDATES = (
@@ -654,42 +657,10 @@ def normalise_volumes(
 
 def positive_percentile_threshold(volume: np.ndarray, percentile: float) -> float:
     """Return the GIF-style isovalue from strictly positive raw voxels."""
-    percentile = float(percentile)
-    if not 0.0 <= percentile < 100.0:
-        raise ValueError(
-            f"Positive-voxel percentile must be in [0, 100), got {percentile}."
-        )
-    values = np.nan_to_num(
-        np.asarray(volume, dtype=np.float32),
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
+    return resolve_volume_isovalue(
+        volume,
+        positive_percentile=float(percentile),
     )
-    value_min = float(values.min())
-    value_max = float(values.max())
-    if value_max <= value_min:
-        raise ValueError(
-            "Cannot select a positive-percentile prediction threshold from a "
-            "constant volume."
-        )
-    positive = values[values > 0.0]
-    if positive.size == 0:
-        raise ValueError(
-            "Cannot select a positive-percentile prediction threshold because "
-            "the prediction has no positive voxels."
-        )
-    threshold = float(np.percentile(positive, percentile))
-    # Mirror volume_gif.py: keep the level strictly inside the data range so a
-    # binary or quantized prediction still has foreground above the threshold.
-    threshold = max(
-        threshold,
-        float(np.nextafter(np.float32(value_min), np.float32(value_max))),
-    )
-    threshold = min(
-        threshold,
-        float(np.nextafter(np.float32(value_max), np.float32(value_min))),
-    )
-    return threshold
 
 
 def _box_mean_valid(volume: np.ndarray, window_size: int) -> np.ndarray:
@@ -806,8 +777,8 @@ def compute_volume_metrics(
     if prediction_threshold_percentile is None:
         applied_prediction_threshold = float(prediction_threshold)
         prediction_threshold_mode = "absolute"
-        prediction_threshold_domain = "normalised_prediction"
-        prediction_mask = (prediction_eval > applied_prediction_threshold) & roi
+        prediction_threshold_domain = "raw_prediction"
+        prediction_mask = (prediction > applied_prediction_threshold) & roi
     else:
         applied_prediction_threshold = positive_percentile_threshold(
             prediction,
@@ -1269,11 +1240,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     prediction_threshold_group = parser.add_mutually_exclusive_group()
     prediction_threshold_group.add_argument(
         "--prediction-threshold",
+        "--volume-gif-isovalue",
+        dest="prediction_threshold",
         type=float,
         default=None,
         help=(
-            "Use a fixed threshold on the normalised prediction instead of the "
-            "default GIF-matched positive-voxel percentile."
+            "Use a fixed raw-prediction threshold instead of the default "
+            "GIF-matched positive-voxel percentile. --volume-gif-isovalue is "
+            "retained as a compatible alias."
         ),
     )
     prediction_threshold_group.add_argument(
@@ -1378,6 +1352,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         str(int(args.early_stop_checks)),
         "--record-optimization-time",
     ]
+    if args.prediction_threshold is not None:
+        effective_training_args.extend(
+            ("--prediction-threshold", str(float(args.prediction_threshold)))
+        )
+    else:
+        effective_training_args.extend(
+            (
+                "--prediction-threshold-percentile",
+                str(float(args.prediction_threshold_percentile)),
+            )
+        )
     if args.output_mode == "json-only":
         effective_training_args.extend(
             ("--evaluation-cache-only", "--no-volume-gif")
