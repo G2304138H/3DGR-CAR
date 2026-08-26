@@ -83,14 +83,14 @@ $ conda install -c astra-toolbox astra-toolbox
 
 We use public dataset from [ASOCA](https://asoca.grand-challenge.org/) and [ImageCAS](https://github.com/XiaoweiXu/ImageCAS-A-Large-Scale-Dataset-and-Benchmark-for-Coronary-Artery-Segmentation-based-on-CT). 
 
-## Demo
+## Stage-2 NPZ reconstruction
 
-
-```python
-$ unzip ToyData.zip
-# 3D Gaussian Representation from FBP result.
-$ python train.py
-```
+The adapted two-view reconstruction entry point reads Stage-2 projection NPZ
+files directly. It uses the stored per-view geometry for FDK initialization,
+per-case Gaussian optimization, reconstructed-volume export, and input/novel
+view reprojection. See
+[3dgs-car/STAGE2_NPZ_RECONSTRUCTION.md](3dgs-car/STAGE2_NPZ_RECONSTRUCTION.md)
+for the data contract and commands.
 
 
 ## 🤝Acknowledgement

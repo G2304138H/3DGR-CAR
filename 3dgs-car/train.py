@@ -208,11 +208,6 @@ if __name__ == "__main__":
     os.environ['NUMEXPR_NUM_THREADS'] = str(cpu_num)
     torch.set_num_threads(cpu_num)
 
-    # 加载数据  newdata: 最新的数据集(更新了降采样方法)    new: 之前的数据集
-
-    CCTADataset_path = r"/data/xuemingfu/PublicREPO/3dgs-car"
-    CCTA_test_list = ['Normal_1.mha']
-
     ##TODO: gaussian_fbp
     import sys
     from arguments_init import *
@@ -231,14 +226,20 @@ if __name__ == "__main__":
     
     parser.add_argument('--max_iter', type=int, default=8000)
     parser.add_argument('--num_init_gaussian', type=int, default=10000)
-    parser.add_argument('--num_proj', type=int, default=16)
+    parser.add_argument('--dataset_path', type=str, required=True)
+    parser.add_argument('--case_names', nargs='+', required=True)
+    parser.add_argument('--output_dir', type=str, default='./gaussian_fbp_result')
+    parser.add_argument('--projection_counts', nargs='+', type=int, default=[2, 4])
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
-    
-    gaussian_fbp_dir = r"/gaussian_fbp_result"
+
+    CCTADataset_path = os.path.abspath(args.dataset_path)
+    CCTA_test_list = list(args.case_names)
+    gaussian_fbp_dir = os.path.abspath(args.output_dir)
+    os.makedirs(gaussian_fbp_dir, exist_ok=True)
     # dataset = 'CCTA' # 'CAS'
     # evaluate_gaussian_fbp(dataset, args.num_proj, gaussian_fbp_dir, op.extract(args), args)
-    for num_proj in [2,4]:
+    for num_proj in args.projection_counts:
         args.num_proj = num_proj
         dataset = 'CCTA'
         evaluate_gaussian_fbp(dataset, args.num_proj, gaussian_fbp_dir, op.extract(args), args)
