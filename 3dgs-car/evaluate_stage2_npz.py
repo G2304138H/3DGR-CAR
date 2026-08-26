@@ -163,15 +163,46 @@ def _case_references(value: object) -> List[str]:
 def load_split_case_references(path: Path, split: str) -> List[str]:
     with path.open("r", encoding="utf-8") as stream:
         document = json.load(stream)
-    references = [reference.strip() for reference in _case_references(_find_split_value(document, split))]
-    if not references:
-        raise ValueError(f"Split {split!r} contains no cases.")
-    if any(not reference for reference in references):
-        raise ValueError(f"Split {split!r} contains an empty case identifier.")
-    duplicates = sorted({reference for reference in references if references.count(reference) > 1})
-    if duplicates:
-        raise ValueError(f"Split {split!r} contains duplicate cases: {duplicates}.")
-    return references
+
+    def validated_references(split_name: str) -> List[str]:
+        references = [
+            reference.strip()
+            for reference in _case_references(
+                _find_split_value(document, split_name)
+            )
+        ]
+        if not references:
+            raise ValueError(f"Split {split_name!r} contains no cases.")
+        if any(not reference for reference in references):
+            raise ValueError(
+                f"Split {split_name!r} contains an empty case identifier."
+            )
+        duplicates = sorted(
+            {
+                reference
+                for reference in references
+                if references.count(reference) > 1
+            }
+        )
+        if duplicates:
+            raise ValueError(
+                f"Split {split_name!r} contains duplicate cases: {duplicates}."
+            )
+        return references
+
+    if _normalise_key(split) in {"valtest", "validationtest"}:
+        combined: List[str] = []
+        seen: set[str] = set()
+        for split_name in ("val", "test"):
+            for reference in validated_references(split_name):
+                if reference not in seen:
+                    combined.append(reference)
+                    seen.add(reference)
+        if not combined:
+            raise ValueError("Combined split 'val_test' contains no cases.")
+        return combined
+
+    return validated_references(split)
 
 
 def _numeric_case_id(value: str) -> Optional[int]:
@@ -1184,7 +1215,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     )
     parser.add_argument("--input-dir", required=True, help="Directory of Stage-2 projection NPZs.")
     parser.add_argument("--split-json", required=True, help="JSON containing train/validation/test cases.")
-    parser.add_argument("--split", required=True, help="Split to evaluate: train, validation/val, or test.")
+    parser.add_argument(
+        "--split",
+        required=True,
+        help=(
+            "Split to evaluate: train, validation/val, test, or val_test "
+            "(validation followed by test)."
+        ),
+    )
     parser.add_argument("--output-dir", required=True, help="Root for reconstructions and metric reports.")
     parser.add_argument(
         "--view-indices",

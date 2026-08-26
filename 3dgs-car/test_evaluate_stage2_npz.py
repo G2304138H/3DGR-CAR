@@ -200,6 +200,30 @@ class SplitLoadingTests(unittest.TestCase):
             )
             self.assertEqual(load_split_case_references(path, "validation"), ["1", "rca_0002"])
 
+    def test_val_test_combines_nested_validation_and_test_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "split.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "dataset": {
+                            "splits": {
+                                "validation": [
+                                    {"case_number": 1},
+                                    {"name": "rca_0002"},
+                                ],
+                                "testing": ["rca_0002", 3, "rca_0004"],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                load_split_case_references(path, "val_test"),
+                ["1", "rca_0002", "3", "rca_0004"],
+            )
+
     def test_case_number_matching(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

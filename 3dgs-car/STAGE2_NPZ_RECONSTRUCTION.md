@@ -96,6 +96,8 @@ computes voxel metrics against a second directory of case-matched ground-truth
 NPZ files. The split JSON may contain top-level `train`, `validation`/`val`, and
 `test` lists, those keys may be nested under `splits`, and each list item may be
 a case name/number or a record such as `{"case_name": "rca_0001"}`.
+Pass `--split val_test` to evaluate validation cases followed by test cases in
+one run. Exact case identifiers present in both lists are evaluated only once.
 
 Ground-truth files may use the ImageCAS layout
 `<ground-truth-dir>/<vessel_type>/<case_id>.npz`, for example `lca/1.npz` and
