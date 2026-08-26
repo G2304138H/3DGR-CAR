@@ -16,6 +16,7 @@ import numpy as np
 
 
 MONITOR_SURFACE_CIRCLE_POINTS = 24
+DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE = 97.0
 
 
 def _set_equal_3d_axes(ax: Any, points: np.ndarray) -> None:
@@ -220,11 +221,22 @@ def _extract_volume_isosurface(
     value_max = float(volume.max())
     if value_max <= value_min:
         raise ValueError("Cannot render an isosurface from a constant volume.")
-    level = (
-        float(isovalue)
-        if isovalue is not None
-        else value_min + 0.25 * (value_max - value_min)
-    )
+    if isovalue is not None:
+        level = float(isovalue)
+    else:
+        positive = volume[volume > 0.0]
+        if positive.size == 0:
+            raise ValueError(
+                "Cannot select the default GIF isovalue because the volume has "
+                "no positive voxels."
+            )
+        level = float(
+            np.percentile(positive, DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE)
+        )
+        # A very sparse or quantized volume can place P97 exactly at an endpoint,
+        # while marching_cubes requires a strictly interior level.
+        level = max(level, float(np.nextafter(value_min, value_max)))
+        level = min(level, float(np.nextafter(value_max, value_min)))
     if not value_min < level < value_max:
         raise ValueError(
             f"Volume GIF isovalue must be inside ({value_min:.7g}, {value_max:.7g}), "

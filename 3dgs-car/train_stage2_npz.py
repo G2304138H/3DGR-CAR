@@ -571,8 +571,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         type=float,
         default=None,
         help=(
-            "Density isovalue for reconstructed_volume.gif. The default is 25%% "
-            "of the final volume's value range."
+            "Density isovalue for reconstructed_volume.gif. The default is the "
+            "97th percentile of strictly positive final-volume voxels."
         ),
     )
     parser.add_argument("--no-volume-gif", action="store_true")

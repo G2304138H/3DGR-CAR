@@ -58,9 +58,10 @@ detector width projected back to isocentre; override it with
 - `optimization_timing.json`: CUDA-synchronized optimizer-loop wall time and run context, when `--record-optimization-time` is enabled.
 - `run_metadata.json`: selected views and reconstruction settings.
 
-The GIF defaults to an isovalue at 25% of the reconstructed volume's value
-range. Override it with `--volume-gif-isovalue VALUE`. Change the monitor timing
-with `--monitor-gif-frames` and `--monitor-gif-fps`, or disable this output with
+The GIF defaults to an isovalue at the 97th percentile of the reconstructed
+volume's strictly positive voxels. Override it with
+`--volume-gif-isovalue VALUE`. Change the monitor timing with
+`--monitor-gif-frames` and `--monitor-gif-fps`, or disable this output with
 `--no-volume-gif`.
 
 ## Optimization timing
