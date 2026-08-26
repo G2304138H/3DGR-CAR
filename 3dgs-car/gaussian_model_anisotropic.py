@@ -172,7 +172,12 @@ class GaussianModelAnisotropic:
         # indices = indices[200000:]
         _, indices = torch.topk(grad_norm, num_samples)
         # 取出这些indices对应的3 D coordinates
-        coords = torch.stack(torch.meshgrid(torch.arange(H), torch.arange(H), torch.arange(W)), dim=-1).reshape(-1,3).cuda()
+        coords = torch.stack(
+            torch.meshgrid(
+                torch.arange(H), torch.arange(H), torch.arange(W), indexing="ij"
+            ),
+            dim=-1,
+        ).reshape(-1, 3).cuda()
         # 实际上现在的实现应该略微有一点不对应，因为去掉了边界的voxe1
         sampled_coords = coords[indices]
         # Create a 3D grid to count the number of sampled points around each point

@@ -149,7 +149,12 @@ class AstraConeVecProjector:
 
     def _forward_tensor(self, volume: torch.Tensor) -> torch.Tensor:
         self._validate_volume(volume)
-        volume_zyx = volume[0].contiguous()
+        # ASTRA consumes the tensor through DLPack and does not participate in
+        # PyTorch autograd.  The surrounding _AstraProjectionFunction supplies
+        # the matching backprojection explicitly, so exporting a detached view
+        # here is both required by torch.__dlpack__ and preserves gradients via
+        # that custom backward method.
+        volume_zyx = volume[0].detach().contiguous()
         if self._has_direct_dlpack and volume.is_cuda:
             # ASTRA's projection kernels may accumulate into the supplied output.
             astra_projection = torch.zeros(
@@ -168,7 +173,9 @@ class AstraConeVecProjector:
 
     def _backward_tensor(self, projections: torch.Tensor) -> torch.Tensor:
         self._validate_projections(projections)
-        astra_projection = projections[0].permute(1, 0, 2).contiguous()
+        astra_projection = (
+            projections[0].detach().permute(1, 0, 2).contiguous()
+        )
         if self._has_direct_dlpack and projections.is_cuda:
             volume = torch.zeros(
                 (self.volume_size, self.volume_size, self.volume_size),
