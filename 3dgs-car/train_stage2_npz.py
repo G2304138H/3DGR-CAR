@@ -525,7 +525,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     parser.set_defaults(iterations=8000, densify_until_iter=8000)
     parser.add_argument("--input", required=True, help="Stage-2 case NPZ, e.g. rca_0001.npz")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--view-indices", nargs=2, type=int, default=[0, 1])
+    parser.add_argument(
+        "--view-indices",
+        nargs="+",
+        type=int,
+        default=[0, 1],
+        help="One or more stored view indices used for reconstruction.",
+    )
     parser.add_argument(
         "--novel-view-indices",
         nargs="*",

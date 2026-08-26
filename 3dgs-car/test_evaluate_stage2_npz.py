@@ -23,6 +23,7 @@ from evaluate_stage2_npz import (
     translate_volume_zyx,
 )
 from volume_gif import resolve_volume_isovalue
+from stage2_npz_data import validate_view_indices
 
 
 class SplitLoadingTests(unittest.TestCase):
@@ -71,6 +72,7 @@ class SplitLoadingTests(unittest.TestCase):
                 "--split", "test",
                 "--output-dir", str(output),
                 "--ground-truth-dir", str(ground_truths),
+                "--view-indices", "0", "1", "2",
             ]
             with mock.patch(
                 "evaluate_stage2_npz.run_reconstruction",
@@ -95,6 +97,11 @@ class SplitLoadingTests(unittest.TestCase):
                 12.5,
             )
             self.assertTrue(results["cases"][0]["case_cache_removed"])
+            view_index = received_training_args.index("--view-indices")
+            self.assertEqual(
+                received_training_args[view_index + 1 : view_index + 4],
+                ["0", "1", "2"],
+            )
             self.assertIn("--prediction-threshold-percentile", received_training_args)
             percentile_index = received_training_args.index(
                 "--prediction-threshold-percentile"
@@ -115,11 +122,19 @@ class SplitLoadingTests(unittest.TestCase):
         ]
         args, _ = parse_args(required)
         self.assertEqual(args.early_stop_checks, 7)
+        self.assertEqual(args.view_indices, [0, 1])
         self.assertIsNone(args.prediction_threshold)
         self.assertEqual(args.prediction_threshold_percentile, 97.0)
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 parse_args([*required, "--early-stop-checks", "0"])
+
+    def test_view_validation_accepts_variable_nonempty_counts(self):
+        np.testing.assert_array_equal(validate_view_indices([3], 7), [3])
+        np.testing.assert_array_equal(
+            validate_view_indices([0, 2, 4, 6], 7),
+            [0, 2, 4, 6],
+        )
 
     def test_nested_validation_alias_and_records(self):
         with tempfile.TemporaryDirectory() as directory:

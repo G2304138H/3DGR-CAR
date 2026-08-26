@@ -1,7 +1,7 @@
 # Stage-2 NPZ reconstruction
 
 `train_stage2_npz.py` reads the Stage-2 ImageCAS NPZ format directly, selects
-two stored views, creates an ASTRA `cone_vec` geometry from their `theta_deg`
+one or more stored views, creates an ASTRA `cone_vec` geometry from their `theta_deg`
 and `phi_deg`, runs FDK initialization, optimizes the 3D Gaussians for that
 case, and exports the Gaussian parameters, reconstructed volume, and remaining
 novel views.
@@ -52,8 +52,8 @@ detector width projected back to isocentre; override it with
 - `reconstructed_volume_zyx.npy`: final Gaussian volume in `[z,y,x]` order.
 - `reconstructed_volume_xyz.nii.gz`: final volume with millimetre voxel spacing, when nibabel is installed.
 - `reconstructed_volume.gif`: prediction-only density isosurface, synchronized to the training monitor's 24-frame, 5-FPS, fixed-22-degree camera and shared GT/prediction framing.
-- `input_view_reprojections.npz`: final reprojections on the two selected input views, their targets, raw line integrals, errors, and per-view metrics.
-- `input_view_reprojections.png`: target/reprojection/error montage for the two selected input views.
+- `input_view_reprojections.npz`: final reprojections on the selected input views, their targets, raw line integrals, errors, and per-view metrics.
+- `input_view_reprojections.png`: target/reprojection/error montage for the selected input views.
 - `novel_views.npz`: projections, stored targets, errors, and per-view metrics at all unselected stored views by default.
 - `novel_view_reprojections.png`: target/reprojection/error montage for the requested novel views.
 - `optimization_timing.json`: CUDA-synchronized optimizer-loop wall time and run context, when `--record-optimization-time` is enabled.
@@ -118,9 +118,11 @@ python evaluate_stage2_npz.py \
   --prediction-threshold-percentile 97
 ```
 
-Options not recognised by the evaluator, such as `--view-indices`,
-`--iterations`, and other optimization settings, are forwarded to
-`train_stage2_npz.py`. Use `--reuse-existing` to keep already completed case
+`--view-indices` accepts one or more indices in both the single-case trainer and
+split evaluator; the evaluator applies that selected list to every case in the
+split. Options not recognised by the evaluator, such as `--iterations` and
+other optimization settings, are forwarded to `train_stage2_npz.py`. Use
+`--reuse-existing` to keep already completed case
 reconstructions, or `--skip-reconstruction` to evaluate existing
 `cases/<case>/reconstructed_volume_zyx.npy` files without CUDA.
 
@@ -213,10 +215,10 @@ contains a separate ROI, `--evaluation-mask-key <key>` restricts all mask
 comparisons to that ROI.
 
 FDK is mathematically designed for a circular, densely sampled cone-beam scan.
-Two Stage-2 clinical views are neither dense nor generally co-circular, so the
+Sparse Stage-2 clinical views are neither dense nor generally co-circular, so the
 FDK result is only a rough Gaussian initialization and will contain artifacts.
 Use `--init-method bp` only if the installed ASTRA version rejects FDK for the
-two cone-vector views.
+small set of cone-vector views.
 
 ## Minimal Python environment (CUDA 12.4 driver)
 

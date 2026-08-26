@@ -1147,6 +1147,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     parser.add_argument("--split", required=True, help="Split to evaluate: train, validation/val, or test.")
     parser.add_argument("--output-dir", required=True, help="Root for reconstructions and metric reports.")
     parser.add_argument(
+        "--view-indices",
+        nargs="+",
+        type=int,
+        default=[0, 1],
+        help=(
+            "One or more stored view indices used as reconstruction inputs for "
+            "every case in this evaluation run."
+        ),
+    )
+    parser.add_argument(
         "--ground-truth-dir",
         "--gt-dir",
         dest="ground_truth_dir",
@@ -1348,6 +1358,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args, training_args = parse_args(argv)
     effective_training_args = [
         *training_args,
+        "--view-indices",
+        *(str(int(index)) for index in args.view_indices),
         "--early-stop-checks",
         str(int(args.early_stop_checks)),
         "--record-optimization-time",
