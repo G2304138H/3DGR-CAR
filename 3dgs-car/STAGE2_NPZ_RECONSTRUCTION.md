@@ -83,6 +83,99 @@ ASTRA 2.4 or newer is strongly recommended because its direct projector API
 accepts PyTorch CUDA tensors. Older ASTRA versions use the implemented
 CPU-transfer fallback at each optimization iteration and will be much slower.
 
+## Split evaluation against ground-truth volumes
+
+`evaluate_stage2_npz.py` runs the single-case reconstruction over one split and
+computes voxel metrics against a second directory of case-matched ground-truth
+NPZ files. The split JSON may contain top-level `train`, `validation`/`val`, and
+`test` lists, those keys may be nested under `splits`, and each list item may be
+a case name/number or a record such as `{"case_name": "rca_0001"}`.
+
+```bash
+python evaluate_stage2_npz.py \
+  --input-dir /path/to/projection_npzs \
+  --split-json /path/to/case_split.json \
+  --split test \
+  --ground-truth-dir /path/to/volume_npzs \
+  --output-dir ./outputs/stage2_test \
+  --view-indices 0 1 \
+  --iterations 8000 \
+  --log-every 100 \
+  --early-stop-checks 7
+```
+
+Options not recognised by the evaluator, such as `--view-indices`,
+`--iterations`, and other optimization settings, are forwarded to
+`train_stage2_npz.py`. Use `--reuse-existing` to keep already completed case
+reconstructions, or `--skip-reconstruction` to evaluate existing
+`cases/<case>/reconstructed_volume_zyx.npy` files without CUDA.
+
+Split evaluation enforces early stopping for every optimized case.
+`--early-stop-checks` must be positive and defaults to 7. With
+`--log-every 100`, a case stops after seven consecutive 100-iteration logging
+checks fail to improve its best checked loss. The effective setting is passed
+to every `train_stage2_npz.py` subprocess and recorded in
+`metrics/evaluation_config.json`.
+
+The ground-truth volume key is auto-detected from common names including `vol`,
+`volume`, `voxel`, `gt_volume`, `segmentation`, and `mask`. For the supplied
+ImageCAS format, `vol` is interpreted as `[x,y,z]`, transposed internally to
+`[z,y,x]`, and its `spacing` values are interpreted as XYZ millimetres. Other
+volume keys default to ZYX. Override these choices with
+`--ground-truth-axis-order`, `--ground-truth-spacing-key`, or
+`--ground-truth-spacing-units`.
+
+### Reversing the projection-centering offset
+
+By default, evaluation reads `projection_center_offset` from each projection
+NPZ and reverses it before computing any voxel metric. The Stage-2 renderer
+centres artery coordinates as
+`centered_xyz = original_xyz - projection_center_offset_xyz`. For a full-size
+GT mask with physical spacing, evaluation samples the GT at
+`original_xyz = prediction_local_xyz + projection_center_offset_xyz`, producing
+a GT mask on the prediction's grid. This physical crop/resampling converts an
+ImageCAS mask such as XYZ `(512,512,275)` into the prediction's ZYX grid, such
+as `(128,128,128)`, without shape-only resizing or clipping the prediction.
+
+The prediction grid uses `volume_extent_m / (N - 1)` because the trainer creates
+it with `linspace(0, 1, N)`, including both physical endpoints. The extent is
+read from each case's `run_metadata.json`. When scoring an older standalone
+reconstruction without that file, pass `--evaluation-volume-extent-m VALUE`.
+Binary GT is sampled with nearest-neighbour interpolation by default; change it
+with `--ground-truth-interpolation linear`.
+
+The attached `artery_mask.npz` has no NIfTI affine, origin, or direction matrix,
+so evaluation assumes GT array index `[0,0,0]` is physical XYZ `(0,0,0)` metres
+and all axes increase positively. If the mask converter uses a different
+axis-aligned physical frame, set `--ground-truth-origin-m X Y Z` and
+`--ground-truth-direction-signs SX SY SZ`. These alignment settings affect the
+metrics materially and should match the source NIfTI convention.
+
+Use `--projection-offset-mode required` to fail if a case lacks the offset, or
+`--projection-offset-mode ignore` only for already aligned data. Each case JSON
+records the stored XYZ offset, GT spacing/origin/direction, original and aligned
+shapes, interpolation, and physical-extent source. `evaluation_arrays.npz`
+contains the prediction and physically aligned GT volume and masks actually
+used for Dice, MSE, and SSIM. The original reconstruction remains unchanged in
+`reconstructed_volume_zyx.npy`.
+
+The evaluator writes:
+
+- `metrics/per_case_metrics.csv` and `.json`: one row/record per requested case.
+- `metrics/evaluation_config.json`: resolved inputs, metric settings, and forwarded training arguments.
+- `metrics/metrics_matrix.npz`: case names, metric names, and a numeric case-by-metric matrix.
+- `metrics/summary_metrics.json`: mean, standard deviation, minimum, and maximum per metric.
+- `metrics/cases/<case>/metrics.json`: the complete individual case report.
+- `metrics/cases/<case>/evaluation_arrays.npz`: normalized volumes, predicted and GT masks, the masked-metric evaluation mask, and an optional ROI mask. Pass `--save-ssim-map` to include the valid-window 3D SSIM map.
+
+Reported scalars include masked 3D Dice, full-volume 3D MSE and SSIM, and
+masked MSE/MAE/PSNR/SSIM. Dice compares thresholded prediction and GT masks;
+the default threshold is `> 0`, matching the original repository's voxel Dice.
+Use `--prediction-threshold` and `--ground-truth-threshold` to change it. By
+default, other masked metrics use GT foreground voxels; `--metric-mask union`
+or `--metric-mask all` changes that region. If a GT NPZ contains a separate ROI,
+`--evaluation-mask-key <key>` restricts all mask comparisons to that ROI.
+
 FDK is mathematically designed for a circular, densely sampled cone-beam scan.
 Two Stage-2 clinical views are neither dense nor generally co-circular, so the
 FDK result is only a rough Gaussian initialization and will contain artifacts.
