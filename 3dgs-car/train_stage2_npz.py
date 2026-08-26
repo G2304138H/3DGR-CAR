@@ -31,6 +31,7 @@ from stage2_npz_data import (
     load_stage2_projection_case,
     validate_view_indices,
 )
+from volume_gif import save_reconstructed_volume_gif
 
 
 def create_grid_3d(depth: int, height: int, width: int, device: torch.device) -> torch.Tensor:
@@ -497,6 +498,30 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--early-stop-checks", type=int, default=7)
     parser.add_argument("--no-densify", action="store_true")
+    parser.add_argument(
+        "--monitor-gif-frames",
+        "--monitor_gif_frames",
+        dest="monitor_gif_frames",
+        type=int,
+        default=24,
+    )
+    parser.add_argument(
+        "--monitor-gif-fps",
+        "--monitor_gif_fps",
+        dest="monitor_gif_fps",
+        type=int,
+        default=5,
+    )
+    parser.add_argument(
+        "--volume-gif-isovalue",
+        type=float,
+        default=None,
+        help=(
+            "Density isovalue for reconstructed_volume.gif. The default is 25%% "
+            "of the final volume's value range."
+        ),
+    )
+    parser.add_argument("--no-volume-gif", action="store_true")
     parser.add_argument("--gpu-index", type=int, default=0)
     return parser.parse_args(argv), optimization
 
@@ -637,6 +662,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     with torch.no_grad():
         final_volume = gaussians.grid_sample(grid, expand=[15, 15, 15]).squeeze(-1)
     save_volume(output_dir, final_volume, volume_extent_m=volume_extent_m)
+    volume_gif_isovalue: Optional[float] = None
     export_gaussians(
         gaussians=gaussians,
         output_dir=output_dir,
@@ -700,6 +726,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         novel_projector.close()
 
+    if not args.no_volume_gif:
+        volume_gif_path = output_dir / "reconstructed_volume.gif"
+        volume_gif_isovalue = save_reconstructed_volume_gif(
+            volume_zyx=final_volume[0].detach().cpu().numpy(),
+            volume_extent_m=volume_extent_m,
+            source_npz=case.path,
+            out_path=volume_gif_path,
+            num_frames=int(args.monitor_gif_frames),
+            fps=int(args.monitor_gif_fps),
+            isovalue=args.volume_gif_isovalue,
+        )
+        print(f"Saved reconstructed-volume GIF: {volume_gif_path}")
+
     metadata = {
         "sample_name": case.sample_name,
         "source_npz": str(case.path),
@@ -718,6 +757,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "elapsed_seconds": float(time.time() - start_time),
         "num_gaussians": int(gaussians.get_gaussians_num),
         "silhouette_gain": silhouette_gain,
+        "volume_gif_frames": int(args.monitor_gif_frames),
+        "volume_gif_fps": int(args.monitor_gif_fps),
+        "volume_gif_isovalue": volume_gif_isovalue,
     }
     (output_dir / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"

@@ -49,10 +49,16 @@ detector width projected back to isocentre; override it with
 - `initial_fbp_volume_zyx.npy`: normalized FDK initialization.
 - `reconstructed_volume_zyx.npy`: final Gaussian volume in `[z,y,x]` order.
 - `reconstructed_volume_xyz.nii.gz`: final volume with millimetre voxel spacing, when nibabel is installed.
+- `reconstructed_volume.gif`: prediction-only density isosurface, synchronized to the training monitor's 24-frame, 5-FPS, fixed-22-degree camera and shared GT/prediction framing.
 - `input_view_reprojections.npz`: final reprojections on the two selected input views, their targets, raw line integrals, errors, and per-view metrics.
 - `input_view_reprojections.png`: target/reprojection/error montage for the two selected input views.
 - `novel_views.npz`: projections at all unselected stored views by default.
 - `run_metadata.json`: selected views and reconstruction settings.
+
+The GIF defaults to an isovalue at 25% of the reconstructed volume's value
+range. Override it with `--volume-gif-isovalue VALUE`. Change the monitor timing
+with `--monitor-gif-frames` and `--monitor-gif-fps`, or disable this output with
+`--no-volume-gif`.
 
 ASTRA 2.4 or newer is strongly recommended because its direct projector API
 accepts PyTorch CUDA tensors. Older ASTRA versions use the implemented
