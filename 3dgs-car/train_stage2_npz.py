@@ -379,9 +379,16 @@ def export_gaussians(
     )
 
 
-def save_volume(output_dir: Path, volume: torch.Tensor, volume_extent_m: float) -> None:
+def save_volume(
+    output_dir: Path,
+    volume: torch.Tensor,
+    volume_extent_m: float,
+    save_nifti: bool = True,
+) -> None:
     volume_np = volume[0].detach().cpu().numpy().astype(np.float32)
     np.save(output_dir / "reconstructed_volume_zyx.npy", volume_np)
+    if not save_nifti:
+        return
     try:
         import nibabel as nib
 
@@ -576,6 +583,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         ),
     )
     parser.add_argument("--no-volume-gif", action="store_true")
+    parser.add_argument(
+        "--evaluation-cache-only",
+        action="store_true",
+        help=(
+            "Write only reconstructed_volume_zyx.npy, timing JSON, and run metadata "
+            "for temporary split evaluation; skip NIfTI, Gaussian, reprojection, "
+            "montage, novel-view, and GIF artifacts."
+        ),
+    )
     parser.add_argument("--gpu-index", type=int, default=0)
     return parser.parse_args(argv), optimization
 
@@ -626,7 +642,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     initial_volume = normalize_initial_volume(
         projector.reconstruct(target, method=str(args.init_method))
     )
-    np.save(output_dir / "initial_fbp_volume_zyx.npy", initial_volume[0].cpu().numpy())
+    if not args.evaluation_cache_only:
+        np.save(
+            output_dir / "initial_fbp_volume_zyx.npy",
+            initial_volume[0].cpu().numpy(),
+        )
 
     gaussians = GaussianModelAnisotropic()
     gaussians.create_from_fbp(
@@ -764,36 +784,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     with torch.no_grad():
         final_volume = gaussians.grid_sample(grid, expand=[15, 15, 15]).squeeze(-1)
-    save_volume(output_dir, final_volume, volume_extent_m=volume_extent_m)
-    volume_gif_isovalue: Optional[float] = None
-    export_gaussians(
-        gaussians=gaussians,
-        output_dir=output_dir,
-        case=case,
-        view_indices=view_indices,
-        cone_vectors=cone_vectors,
+    save_volume(
+        output_dir,
+        final_volume,
         volume_extent_m=volume_extent_m,
-        silhouette_gain=silhouette_gain,
+        save_nifti=not args.evaluation_cache_only,
     )
+    volume_gif_isovalue: Optional[float] = None
+    if not args.evaluation_cache_only:
+        export_gaussians(
+            gaussians=gaussians,
+            output_dir=output_dir,
+            case=case,
+            view_indices=view_indices,
+            cone_vectors=cone_vectors,
+            volume_extent_m=volume_extent_m,
+            silhouette_gain=silhouette_gain,
+        )
 
-    with torch.no_grad():
-        input_line_integrals = projector._forward_tensor(final_volume)
-        if target_type == "mask":
-            input_reprojections = silhouette_from_line_integrals(
-                input_line_integrals, gain=float(silhouette_gain)
-            )
-        else:
-            input_reprojections = input_line_integrals
-    save_input_view_reprojections(
-        output_dir=output_dir,
-        case=case,
-        view_indices=view_indices,
-        target=target,
-        predictions=input_reprojections,
-        line_integrals=input_line_integrals,
-    )
+    if not args.evaluation_cache_only:
+        with torch.no_grad():
+            input_line_integrals = projector._forward_tensor(final_volume)
+            if target_type == "mask":
+                input_reprojections = silhouette_from_line_integrals(
+                    input_line_integrals, gain=float(silhouette_gain)
+                )
+            else:
+                input_reprojections = input_line_integrals
+        save_input_view_reprojections(
+            output_dir=output_dir,
+            case=case,
+            view_indices=view_indices,
+            target=target,
+            predictions=input_reprojections,
+            line_integrals=input_line_integrals,
+        )
 
-    if args.novel_view_indices is None:
+    if args.evaluation_cache_only:
+        novel_indices = np.empty((0,), dtype=np.int64)
+    elif args.novel_view_indices is None:
         selected = set(int(index) for index in view_indices)
         novel_indices = np.asarray(
             [index for index in range(case.num_views) if index not in selected],
@@ -855,7 +884,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         novel_projector.close()
 
-    if not args.no_volume_gif:
+    if not args.no_volume_gif and not args.evaluation_cache_only:
         volume_gif_path = output_dir / "reconstructed_volume.gif"
         volume_gif_isovalue = save_reconstructed_volume_gif(
             volume_zyx=final_volume[0].detach().cpu().numpy(),
@@ -887,6 +916,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             time.perf_counter() - post_initialization_start_time
         ),
         "record_optimization_time": bool(args.record_optimization_time),
+        "evaluation_cache_only": bool(args.evaluation_cache_only),
         "optimization_iterations_completed": int(
             optimization_iterations_completed
         ),
@@ -902,8 +932,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dumps(metadata, indent=2), encoding="utf-8"
     )
     projector.close()
-    print(f"Saved Gaussian checkpoint: {output_dir / 'gaussians.pt'}")
-    print(f"Saved portable Gaussian arrays: {output_dir / 'gaussians.npz'}")
+    if not args.evaluation_cache_only:
+        print(f"Saved Gaussian checkpoint: {output_dir / 'gaussians.pt'}")
+        print(f"Saved portable Gaussian arrays: {output_dir / 'gaussians.npz'}")
+    else:
+        print("Evaluation cache-only mode: skipped persistent visualization/model artifacts.")
     print(f"Saved reconstructed volume under: {output_dir}")
     return 0
 

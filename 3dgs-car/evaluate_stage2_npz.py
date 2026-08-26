@@ -15,8 +15,10 @@ import csv
 import json
 import math
 import re
+import shutil
 import subprocess
 import sys
+import time
 from collections import deque
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -58,6 +60,12 @@ METRIC_NAMES = (
     "masked_mae",
     "masked_psnr",
     "masked_ssim_3d",
+)
+TIMING_NAMES = (
+    "case_wall_time_seconds",
+    "reconstruction_wall_time_seconds",
+    "optimization_elapsed_seconds",
+    "metrics_wall_time_seconds",
 )
 
 
@@ -218,14 +226,56 @@ class NpzIndex:
         )
 
 
-def projection_sample_name(path: Path) -> str:
+def projection_case_identity(path: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    sample_name = path.stem
+    vessel_type: Optional[str] = None
+    case_id: Optional[str] = None
     try:
         with np.load(path, allow_pickle=False) as archive:
             if "sample_name" in archive.files:
-                return str(np.asarray(archive["sample_name"]).reshape(()).item())
+                sample_name = str(
+                    np.asarray(archive["sample_name"]).reshape(()).item()
+                )
+            if "vessel_type" in archive.files:
+                vessel_type = str(
+                    np.asarray(archive["vessel_type"]).reshape(()).item()
+                ).strip().lower()
+            if "case_id" in archive.files:
+                case_id = str(
+                    np.asarray(archive["case_id"]).reshape(()).item()
+                ).strip()
     except (OSError, ValueError):
         pass
-    return path.stem
+    match = re.match(r"^([a-zA-Z]+)[_-]?(\d+)$", sample_name)
+    if match is not None:
+        if not vessel_type:
+            vessel_type = match.group(1).lower()
+        if not case_id:
+            case_id = str(int(match.group(2)))
+    return sample_name, vessel_type or None, case_id or None
+
+
+def projection_sample_name(path: Path) -> str:
+    return projection_case_identity(path)[0]
+
+
+def ground_truth_case_references(
+    projection_path: Path,
+    sample_name: str,
+    split_reference: str,
+) -> Tuple[List[str], Optional[str], Optional[str]]:
+    _, vessel_type, case_id = projection_case_identity(projection_path)
+    references: List[str] = []
+    if vessel_type and case_id:
+        references.append(str(Path(vessel_type) / case_id))
+        numeric_case_id = _numeric_case_id(case_id)
+        if numeric_case_id is not None:
+            references.append(str(Path(vessel_type) / str(numeric_case_id)))
+    if case_id:
+        references.append(case_id)
+    references.extend((sample_name, projection_path.stem, split_reference))
+    unique_references = list(dict.fromkeys(references))
+    return unique_references, vessel_type, case_id
 
 
 def _squeeze_volume(array: np.ndarray, source: str) -> np.ndarray:
@@ -846,24 +896,110 @@ def summarise_metrics(
     return summary
 
 
+def summarise_timings(
+    records: Sequence[Mapping[str, object]],
+    num_cases_requested: int,
+) -> Dict[str, object]:
+    completed = [record for record in records if record.get("status") == "completed"]
+    timing_summary: Dict[str, object] = {}
+    for name in TIMING_NAMES:
+        values = np.asarray(
+            [
+                float(record[name])
+                for record in completed
+                if record.get(name) is not None
+            ],
+            dtype=np.float64,
+        )
+        finite = values[np.isfinite(values)]
+        timing_summary[name] = {
+            "mean": float(np.mean(finite)) if finite.size else float("nan"),
+            "std": float(np.std(finite)) if finite.size else float("nan"),
+            "min": float(np.min(finite)) if finite.size else float("nan"),
+            "max": float(np.max(finite)) if finite.size else float("nan"),
+            "num_cases": int(finite.size),
+        }
+    case_values = np.asarray(
+        [
+            float(record["case_wall_time_seconds"])
+            for record in completed
+            if record.get("case_wall_time_seconds") is not None
+        ],
+        dtype=np.float64,
+    )
+    finite_case_values = case_values[np.isfinite(case_values)]
+    average_case_seconds = (
+        float(np.mean(finite_case_values))
+        if finite_case_values.size
+        else float("nan")
+    )
+    remaining_cases = max(int(num_cases_requested) - len(records), 0)
+    timing_summary["average_case_seconds"] = average_case_seconds
+    timing_summary["estimated_full_split_seconds"] = (
+        average_case_seconds * int(num_cases_requested)
+        if math.isfinite(average_case_seconds)
+        else float("nan")
+    )
+    timing_summary["estimated_remaining_seconds"] = (
+        average_case_seconds * remaining_cases
+        if math.isfinite(average_case_seconds)
+        else float("nan")
+    )
+    timing_summary["remaining_cases"] = remaining_cases
+    return timing_summary
+
+
 def write_aggregate_reports(
     output_dir: Path,
     records: Sequence[Mapping[str, object]],
     split: str,
     num_cases_requested: Optional[int] = None,
+    output_mode: str = "full",
+    evaluation_config: Optional[Mapping[str, object]] = None,
 ) -> None:
+    requested = len(records) if num_cases_requested is None else int(num_cases_requested)
+    summary = summarise_metrics(records, split, requested)
+    summary["timing"] = summarise_timings(records, requested)
+    if output_mode == "json-only":
+        completed = [
+            record for record in records if record.get("status") == "completed"
+        ]
+        write_json(
+            output_dir / "evaluation_results.json",
+            {
+                "format": "3dgr_car_stage2_evaluation_v2",
+                "configuration": dict(evaluation_config or {}),
+                "summary": summary,
+                "matrix": {
+                    "case_names": [
+                        str(record["case_name"]) for record in completed
+                    ],
+                    "metric_names": list(METRIC_NAMES),
+                    "values": [
+                        [float(record[name]) for name in METRIC_NAMES]
+                        for record in completed
+                    ],
+                },
+                "cases": list(records),
+            },
+        )
+        return
+    if output_mode != "full":
+        raise ValueError(f"Unsupported output mode: {output_mode!r}.")
     metrics_dir = output_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     write_json(metrics_dir / "per_case_metrics.json", list(records))
     write_json(
         metrics_dir / "summary_metrics.json",
-        summarise_metrics(records, split, num_cases_requested),
+        summary,
     )
 
     fieldnames = [
         "split",
         "split_case_id",
         "case_name",
+        "vessel_type",
+        "source_case_id",
         "status",
         *METRIC_NAMES,
         "prediction_foreground_voxels",
@@ -889,6 +1025,11 @@ def write_aggregate_reports(
         "applied_prediction_shift_zyx_voxels",
         "volume_extent_m_for_offset",
         "offset_interpolation",
+        *TIMING_NAMES,
+        "optimization_seconds_per_iteration",
+        "optimization_iterations_completed",
+        "optimization_early_stopped",
+        "case_cache_removed",
         "error",
     ]
     with (metrics_dir / "per_case_metrics.csv").open("w", encoding="utf-8", newline="") as stream:
@@ -907,6 +1048,33 @@ def write_aggregate_reports(
         metric_names=np.asarray(METRIC_NAMES),
         values=matrix,
     )
+
+
+def load_case_optimization_timing(case_output_dir: Path) -> Dict[str, object]:
+    timing_path = case_output_dir / "optimization_timing.json"
+    if not timing_path.is_file():
+        return {}
+    with timing_path.open("r", encoding="utf-8") as stream:
+        timing = json.load(stream)
+    return {
+        "optimization_elapsed_seconds": timing.get("elapsed_seconds"),
+        "optimization_seconds_per_iteration": timing.get("seconds_per_iteration"),
+        "optimization_iterations_requested": timing.get("iterations_requested"),
+        "optimization_iterations_completed": timing.get("iterations_completed"),
+        "optimization_early_stopped": timing.get("early_stopped"),
+        "optimization_gpu_name": timing.get("gpu_name"),
+    }
+
+
+def remove_temporary_case_cache(case_output_dir: Path, cache_root: Path) -> None:
+    resolved_case = case_output_dir.resolve()
+    resolved_root = cache_root.resolve()
+    if resolved_case.parent != resolved_root or resolved_case == resolved_root:
+        raise ValueError(f"Refusing to remove unsafe case cache path: {resolved_case}")
+    if case_output_dir.is_symlink():
+        raise ValueError(f"Refusing to remove symlinked case cache: {case_output_dir}")
+    if case_output_dir.exists():
+        shutil.rmtree(case_output_dir)
 
 
 def run_reconstruction(
@@ -1052,6 +1220,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help="Include the valid-window 3D SSIM map in each evaluation_arrays.npz.",
     )
     parser.add_argument(
+        "--output-mode",
+        choices=("json-only", "full"),
+        default="json-only",
+        help=(
+            "Write one evaluation_results.json and remove temporary case artifacts "
+            "by default; full preserves the legacy CSV/NPZ/per-case outputs."
+        ),
+    )
+    parser.add_argument(
+        "--keep-case-cache",
+        action="store_true",
+        help="Keep temporary reconstruction/timing files after JSON-only evaluation.",
+    )
+    parser.add_argument(
         "--skip-reconstruction",
         action="store_true",
         help="Only score existing cases/<case>/reconstructed_volume_zyx.npy files.",
@@ -1084,6 +1266,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         parser.error(f"Trainer options have no effect with --skip-reconstruction: {training_args}.")
     if args.ssim_window_size < 3 or args.ssim_window_size % 2 == 0:
         parser.error("--ssim-window-size must be an odd integer >= 3.")
+    if args.output_mode == "json-only" and args.save_ssim_map:
+        parser.error("--save-ssim-map requires --output-mode full.")
     if args.early_stop_checks <= 0:
         parser.error(
             "--early-stop-checks must be positive; split evaluation requires "
@@ -1098,7 +1282,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         *training_args,
         "--early-stop-checks",
         str(int(args.early_stop_checks)),
+        "--record-optimization-time",
     ]
+    if args.output_mode == "json-only":
+        effective_training_args.extend(
+            ("--evaluation-cache-only", "--no-volume-gif")
+        )
     input_dir = Path(args.input_dir).expanduser().resolve()
     split_json = Path(args.split_json).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
@@ -1112,23 +1301,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     records: List[Dict[str, object]] = []
     failed = False
 
-    metrics_dir = output_dir / "metrics"
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-    write_json(
-        metrics_dir / "evaluation_config.json",
-        {
-            **vars(args),
-            "input_dir": str(input_dir),
-            "split_json": str(split_json),
-            "output_dir": str(output_dir),
-            "ground_truth_dir": str(ground_truth_dir),
-            "training_args": effective_training_args,
-            "resolved_split_cases": references,
-        },
-    )
+    evaluation_config = {
+        **vars(args),
+        "input_dir": str(input_dir),
+        "split_json": str(split_json),
+        "output_dir": str(output_dir),
+        "ground_truth_dir": str(ground_truth_dir),
+        "training_args": effective_training_args,
+        "resolved_split_cases": references,
+    }
+    if args.output_mode == "full":
+        metrics_dir = output_dir / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        write_json(metrics_dir / "evaluation_config.json", evaluation_config)
 
     print(f"Evaluating split {args.split!r}: {len(references)} cases", flush=True)
     for case_number, reference in enumerate(references, start=1):
+        case_timer_start = time.perf_counter()
+        should_train = False
+        cache_created_by_run = False
+        case_output_dir: Optional[Path] = None
         record: Dict[str, object] = {
             "split": args.split,
             "split_case_id": reference,
@@ -1140,11 +1332,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             sample_name = projection_sample_name(projection_path)
             record["case_name"] = sample_name
             record["projection_npz"] = str(projection_path)
+            (
+                ground_truth_references,
+                vessel_type,
+                source_case_id,
+            ) = ground_truth_case_references(
+                projection_path,
+                sample_name,
+                reference,
+            )
             ground_truth_path = ground_truth_index.resolve(
-                [sample_name, projection_path.stem, reference], "ground-truth"
+                ground_truth_references,
+                "ground-truth",
             )
             record["ground_truth_npz"] = str(ground_truth_path)
+            record["vessel_type"] = vessel_type
+            record["source_case_id"] = source_case_id
+            record["ground_truth_match_references"] = ground_truth_references
             case_output_dir = output_dir / "cases" / projection_path.stem
+            cache_had_files = bool(
+                case_output_dir.is_dir() and any(case_output_dir.iterdir())
+            )
             case_output_dir.mkdir(parents=True, exist_ok=True)
             reconstruction_path = case_output_dir / "reconstructed_volume_zyx.npy"
             record["reconstruction_volume"] = str(reconstruction_path)
@@ -1157,18 +1365,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             should_train = not args.skip_reconstruction and not (
                 args.reuse_existing and reconstruction_path.is_file()
             )
+            if (
+                args.output_mode == "json-only"
+                and should_train
+                and cache_had_files
+                and not args.keep_case_cache
+            ):
+                raise FileExistsError(
+                    f"JSON-only cleanup will not overwrite and remove a non-empty "
+                    f"existing cache: {case_output_dir}. Use a fresh output directory, "
+                    "--reuse-existing, or --keep-case-cache."
+                )
             if should_train:
+                cache_created_by_run = not cache_had_files
+                reconstruction_timer_start = time.perf_counter()
                 run_reconstruction(
                     training_script,
                     projection_path,
                     case_output_dir,
                     effective_training_args,
                 )
+                record["reconstruction_wall_time_seconds"] = float(
+                    time.perf_counter() - reconstruction_timer_start
+                )
+            else:
+                record["reconstruction_wall_time_seconds"] = 0.0
+            record["used_existing_reconstruction"] = bool(not should_train)
             if not reconstruction_path.is_file():
                 raise FileNotFoundError(
                     f"Expected reconstructed volume was not produced: {reconstruction_path}"
                 )
 
+            record.update(load_case_optimization_timing(case_output_dir))
+            metrics_timer_start = time.perf_counter()
             prediction = _squeeze_volume(
                 np.load(reconstruction_path, allow_pickle=False),
                 str(reconstruction_path),
@@ -1381,37 +1610,112 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "offset_interpolation": args.offset_interpolation,
                 }
             )
+            record["metrics_wall_time_seconds"] = float(
+                time.perf_counter() - metrics_timer_start
+            )
 
-            case_metrics_dir = output_dir / "metrics" / "cases" / projection_path.stem
-            case_metrics_dir.mkdir(parents=True, exist_ok=True)
-            arrays_path = case_metrics_dir / "evaluation_arrays.npz"
-            if not args.save_ssim_map:
-                arrays.pop("ssim_map_valid_zyx")
-            np.savez_compressed(arrays_path, **arrays)
-            record["evaluation_arrays"] = str(arrays_path)
-            write_json(case_metrics_dir / "metrics.json", record)
+            if args.output_mode == "full":
+                case_metrics_dir = (
+                    output_dir / "metrics" / "cases" / projection_path.stem
+                )
+                case_metrics_dir.mkdir(parents=True, exist_ok=True)
+                arrays_path = case_metrics_dir / "evaluation_arrays.npz"
+                if not args.save_ssim_map:
+                    arrays.pop("ssim_map_valid_zyx")
+                np.savez_compressed(arrays_path, **arrays)
+                record["evaluation_arrays"] = str(arrays_path)
+                write_json(case_metrics_dir / "metrics.json", record)
+
+            case_cache_removed = False
+            if (
+                args.output_mode == "json-only"
+                and should_train
+                and cache_created_by_run
+                and not args.keep_case_cache
+                and case_output_dir is not None
+            ):
+                remove_temporary_case_cache(
+                    case_output_dir,
+                    output_dir / "cases",
+                )
+                case_cache_removed = True
+            record["case_cache_removed"] = case_cache_removed
+            record["case_wall_time_seconds"] = float(
+                time.perf_counter() - case_timer_start
+            )
             print(
                 f"  Dice={float(record['masked_dice_3d']):.6f} "
                 f"SSIM={float(record['ssim_3d']):.6f} "
-                f"masked SSIM={float(record['masked_ssim_3d']):.6f}",
+                f"masked SSIM={float(record['masked_ssim_3d']):.6f} "
+                f"case time={float(record['case_wall_time_seconds']):.1f}s",
                 flush=True,
             )
         except Exception as error:
             failed = True
             record["error"] = f"{type(error).__name__}: {error}"
+            if (
+                args.output_mode == "json-only"
+                and should_train
+                and cache_created_by_run
+                and not args.keep_case_cache
+                and case_output_dir is not None
+            ):
+                try:
+                    remove_temporary_case_cache(
+                        case_output_dir,
+                        output_dir / "cases",
+                    )
+                    record["case_cache_removed"] = True
+                except Exception as cleanup_error:
+                    record["cache_cleanup_error"] = (
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+            record["case_wall_time_seconds"] = float(
+                time.perf_counter() - case_timer_start
+            )
             print(f"  ERROR: {record['error']}", file=sys.stderr, flush=True)
             records.append(record)
-            write_aggregate_reports(output_dir, records, args.split, len(references))
+            write_aggregate_reports(
+                output_dir,
+                records,
+                args.split,
+                len(references),
+                output_mode=args.output_mode,
+                evaluation_config=evaluation_config,
+            )
             if not args.continue_on_error:
                 return 1
             continue
 
         records.append(record)
-        write_aggregate_reports(output_dir, records, args.split, len(references))
+        write_aggregate_reports(
+            output_dir,
+            records,
+            args.split,
+            len(references),
+            output_mode=args.output_mode,
+            evaluation_config=evaluation_config,
+        )
+        timing = summarise_timings(records, len(references))
+        average_case_seconds = float(timing["average_case_seconds"])
+        remaining_seconds = float(timing["estimated_remaining_seconds"])
+        print(
+            f"  Rolling average={average_case_seconds:.1f}s/case; "
+            f"estimated remaining={remaining_seconds / 3600.0:.2f}h",
+            flush=True,
+        )
 
-    summary_path = output_dir / "metrics" / "summary_metrics.json"
-    print(f"Saved per-case metrics under: {output_dir / 'metrics'}", flush=True)
-    print(f"Saved split summary: {summary_path}", flush=True)
+    cache_root = output_dir / "cases"
+    if args.output_mode == "json-only" and cache_root.is_dir():
+        try:
+            cache_root.rmdir()
+        except OSError:
+            pass
+    if args.output_mode == "json-only":
+        final_path = output_dir / "evaluation_results.json"
+    else:
+        final_path = output_dir / "metrics" / "summary_metrics.json"
+    print(f"Saved final evaluation JSON: {final_path}", flush=True)
     return 1 if failed else 0
 
 

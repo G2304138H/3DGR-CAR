@@ -91,6 +91,13 @@ NPZ files. The split JSON may contain top-level `train`, `validation`/`val`, and
 `test` lists, those keys may be nested under `splits`, and each list item may be
 a case name/number or a record such as `{"case_name": "rca_0001"}`.
 
+Ground-truth files may use the ImageCAS layout
+`<ground-truth-dir>/<vessel_type>/<case_id>.npz`, for example `lca/1.npz` and
+`rca/1.npz`. The evaluator reads `vessel_type` and `case_id` from each projection
+NPZ and tries this relative path first, so LCA and RCA cases with the same
+numeric ID are unambiguous. A vessel-specific directory such as
+`--ground-truth-dir /home/renyu/data/imagecas_voxel/lca` is also supported.
+
 ```bash
 python evaluate_stage2_npz.py \
   --input-dir /path/to/projection_npzs \
@@ -159,14 +166,30 @@ contains the prediction and physically aligned GT volume and masks actually
 used for Dice, MSE, and SSIM. The original reconstruction remains unchanged in
 `reconstructed_volume_zyx.npy`.
 
-The evaluator writes:
+### JSON-only output and timing
 
-- `metrics/per_case_metrics.csv` and `.json`: one row/record per requested case.
-- `metrics/evaluation_config.json`: resolved inputs, metric settings, and forwarded training arguments.
-- `metrics/metrics_matrix.npz`: case names, metric names, and a numeric case-by-metric matrix.
-- `metrics/summary_metrics.json`: mean, standard deviation, minimum, and maximum per metric.
-- `metrics/cases/<case>/metrics.json`: the complete individual case report.
-- `metrics/cases/<case>/evaluation_arrays.npz`: normalized volumes, predicted and GT masks, the masked-metric evaluation mask, and an optional ROI mask. Pass `--save-ssim-map` to include the valid-window 3D SSIM map.
+Split evaluation defaults to `--output-mode json-only`. During each case, the
+trainer uses `--evaluation-cache-only`: it creates only the reconstructed NPY,
+CUDA-synchronized optimization timing JSON, and run metadata required for
+evaluation. It does not create Gaussian checkpoints, portable NPZs, NIfTI,
+reprojection NPZ/PNG files, novel-view outputs, or GIFs. After metrics and
+timing are captured, the evaluator removes that newly created case cache.
+
+The only persistent output in a fresh output directory is
+`evaluation_results.json`. It contains:
+
+- the resolved configuration and effective trainer arguments;
+- every case's metrics, status, alignment metadata, early-stopping result, and timing;
+- the case-by-metric matrix as JSON arrays (`case_names`, `metric_names`, and `values`);
+- aggregate metric mean/std/min/max values;
+- optimization-only, reconstruction-wall, metrics, and total-case timing summaries;
+- average seconds per completed case and estimated full/remaining split time.
+
+The console prints the rolling mean seconds per case and estimated remaining
+hours after every completed case. Pass `--keep-case-cache` to retain temporary
+case files. Pass `--output-mode full` only when the legacy CSV, NPZ matrix,
+per-case arrays/JSON, reconstruction artifacts, PNGs, and other diagnostic
+outputs are wanted.
 
 Reported scalars include masked 3D Dice, full-volume 3D MSE and SSIM, and
 masked MSE/MAE/PSNR/SSIM. Dice compares thresholded prediction and GT masks;

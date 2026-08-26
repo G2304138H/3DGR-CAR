@@ -3,6 +3,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -10,8 +11,10 @@ import numpy as np
 from evaluate_stage2_npz import (
     NpzIndex,
     compute_volume_metrics,
+    ground_truth_case_references,
     load_ground_truth_volume,
     load_split_case_references,
+    main,
     parse_args,
     projection_offset_to_voxel_shift_zyx,
     resample_ground_truth_to_prediction_grid,
@@ -21,6 +24,77 @@ from evaluate_stage2_npz import (
 
 
 class SplitLoadingTests(unittest.TestCase):
+    def test_json_only_run_removes_case_cache_and_embeds_timing_matrix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            projections = root / "projections"
+            ground_truths = root / "ground_truths"
+            output = root / "output"
+            projections.mkdir()
+            (ground_truths / "rca").mkdir(parents=True)
+            volume = np.zeros((9, 9, 9), dtype=np.float32)
+            volume[3:6, 3:6, 3:6] = 1.0
+            np.savez(
+                projections / "rca_0001.npz",
+                sample_name="rca_0001",
+                vessel_type="rca",
+                case_id="1",
+            )
+            np.savez(ground_truths / "rca" / "1.npz", voxel=volume)
+            split = root / "split.json"
+            split.write_text(json.dumps({"test": ["rca_0001"]}), encoding="utf-8")
+
+            def fake_reconstruction(_script, _projection, case_output, _args):
+                np.save(case_output / "reconstructed_volume_zyx.npy", volume)
+                (case_output / "optimization_timing.json").write_text(
+                    json.dumps(
+                        {
+                            "elapsed_seconds": 12.5,
+                            "seconds_per_iteration": 0.025,
+                            "iterations_requested": 8000,
+                            "iterations_completed": 500,
+                            "early_stopped": True,
+                            "gpu_name": "test-gpu",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            argv = [
+                "--input-dir", str(projections),
+                "--split-json", str(split),
+                "--split", "test",
+                "--output-dir", str(output),
+                "--ground-truth-dir", str(ground_truths),
+            ]
+            with mock.patch(
+                "evaluate_stage2_npz.run_reconstruction",
+                side_effect=fake_reconstruction,
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(argv), 0)
+
+            files = sorted(
+                path.relative_to(output).as_posix()
+                for path in output.rglob("*")
+                if path.is_file()
+            )
+            self.assertEqual(files, ["evaluation_results.json"])
+            results = json.loads(
+                (output / "evaluation_results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(results["matrix"]["case_names"], ["rca_0001"])
+            self.assertEqual(len(results["matrix"]["values"]), 1)
+            self.assertEqual(
+                results["cases"][0]["optimization_elapsed_seconds"],
+                12.5,
+            )
+            self.assertTrue(results["cases"][0]["case_cache_removed"])
+            self.assertGreater(
+                results["summary"]["timing"]["average_case_seconds"],
+                0.0,
+            )
+
     def test_split_evaluation_requires_positive_early_stopping_patience(self):
         required = [
             "--input-dir", "input",
@@ -49,6 +123,31 @@ class SplitLoadingTests(unittest.TestCase):
             root = Path(directory)
             np.savez(root / "rca_0007.npz", volume=np.zeros((3, 3, 3)))
             self.assertEqual(NpzIndex(root).resolve(["7"], "projection").name, "rca_0007.npz")
+
+    def test_vessel_subdirectory_disambiguates_numeric_gt_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            projection = root / "lca_0001.npz"
+            np.savez(
+                projection,
+                sample_name="lca_0001",
+                vessel_type="lca",
+                case_id="1",
+            )
+            ground_truth_root = root / "ground_truth"
+            (ground_truth_root / "lca").mkdir(parents=True)
+            (ground_truth_root / "rca").mkdir(parents=True)
+            np.savez(ground_truth_root / "lca" / "1.npz", vol=np.zeros((3, 3, 3)))
+            np.savez(ground_truth_root / "rca" / "1.npz", vol=np.zeros((3, 3, 3)))
+            references, vessel_type, case_id = ground_truth_case_references(
+                projection,
+                "lca_0001",
+                "lca_0001.npz",
+            )
+            resolved = NpzIndex(ground_truth_root).resolve(references, "ground-truth")
+            self.assertEqual(vessel_type, "lca")
+            self.assertEqual(case_id, "1")
+            self.assertEqual(resolved, (ground_truth_root / "lca" / "1.npz").resolve())
 
     def test_split_key_with_case_numbers_suffix(self):
         with tempfile.TemporaryDirectory() as directory:
