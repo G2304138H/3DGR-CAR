@@ -899,6 +899,32 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(_json_safe(value), indent=2), encoding="utf-8")
 
 
+def finite_descriptive_statistics(values: np.ndarray) -> Dict[str, object]:
+    """Summarize finite values and return the sample-based standard error."""
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    finite = values[np.isfinite(values)]
+    count = int(finite.size)
+    sample_std = (
+        float(np.std(finite, ddof=1))
+        if count >= 2
+        else float("nan")
+    )
+    return {
+        "mean": float(np.mean(finite)) if count else float("nan"),
+        # Preserve the existing population-standard-deviation convention.
+        "std": float(np.std(finite, ddof=0)) if count else float("nan"),
+        "standard_error": (
+            sample_std / math.sqrt(float(count))
+            if count >= 2
+            else float("nan")
+        ),
+        "min": float(np.min(finite)) if count else float("nan"),
+        "max": float(np.max(finite)) if count else float("nan"),
+        "num_finite": count,
+        "num_nonfinite": int(values.size - count),
+    }
+
+
 def summarise_metrics(
     records: Sequence[Mapping[str, object]],
     split: str,
@@ -918,15 +944,7 @@ def summarise_metrics(
     metrics_summary: Dict[str, object] = {}
     for name in METRIC_NAMES:
         values = np.asarray([float(record[name]) for record in completed], dtype=np.float64)
-        finite = values[np.isfinite(values)]
-        metrics_summary[name] = {
-            "mean": float(np.mean(finite)) if finite.size else float("nan"),
-            "std": float(np.std(finite)) if finite.size else float("nan"),
-            "min": float(np.min(finite)) if finite.size else float("nan"),
-            "max": float(np.max(finite)) if finite.size else float("nan"),
-            "num_finite": int(finite.size),
-            "num_nonfinite": int(values.size - finite.size),
-        }
+        metrics_summary[name] = finite_descriptive_statistics(values)
     summary["metrics"] = metrics_summary
     return summary
 
@@ -946,14 +964,9 @@ def summarise_timings(
             ],
             dtype=np.float64,
         )
-        finite = values[np.isfinite(values)]
-        timing_summary[name] = {
-            "mean": float(np.mean(finite)) if finite.size else float("nan"),
-            "std": float(np.std(finite)) if finite.size else float("nan"),
-            "min": float(np.min(finite)) if finite.size else float("nan"),
-            "max": float(np.max(finite)) if finite.size else float("nan"),
-            "num_cases": int(finite.size),
-        }
+        statistics = finite_descriptive_statistics(values)
+        statistics["num_cases"] = statistics.pop("num_finite")
+        timing_summary[name] = statistics
     case_values = np.asarray(
         [
             float(record["case_wall_time_seconds"])
@@ -970,6 +983,9 @@ def summarise_timings(
     )
     remaining_cases = max(int(num_cases_requested) - len(records), 0)
     timing_summary["average_case_seconds"] = average_case_seconds
+    timing_summary["average_case_seconds_standard_error"] = timing_summary[
+        "case_wall_time_seconds"
+    ]["standard_error"]
     timing_summary["estimated_full_split_seconds"] = (
         average_case_seconds * int(num_cases_requested)
         if math.isfinite(average_case_seconds)
@@ -1013,6 +1029,18 @@ def write_aggregate_reports(
                     "values": [
                         [float(record[name]) for name in METRIC_NAMES]
                         for record in completed
+                    ],
+                    "column_mean": [
+                        float(summary["metrics"][name]["mean"])
+                        for name in METRIC_NAMES
+                    ],
+                    "column_standard_error": [
+                        float(summary["metrics"][name]["standard_error"])
+                        for name in METRIC_NAMES
+                    ],
+                    "column_num_finite": [
+                        int(summary["metrics"][name]["num_finite"])
+                        for name in METRIC_NAMES
                     ],
                 },
                 "cases": list(records),
@@ -1085,6 +1113,18 @@ def write_aggregate_reports(
         case_names=np.asarray([str(record["case_name"]) for record in completed]),
         metric_names=np.asarray(METRIC_NAMES),
         values=matrix,
+        column_mean=np.asarray(
+            [summary["metrics"][name]["mean"] for name in METRIC_NAMES],
+            dtype=np.float64,
+        ),
+        column_standard_error=np.asarray(
+            [summary["metrics"][name]["standard_error"] for name in METRIC_NAMES],
+            dtype=np.float64,
+        ),
+        column_num_finite=np.asarray(
+            [summary["metrics"][name]["num_finite"] for name in METRIC_NAMES],
+            dtype=np.int64,
+        ),
     )
 
 

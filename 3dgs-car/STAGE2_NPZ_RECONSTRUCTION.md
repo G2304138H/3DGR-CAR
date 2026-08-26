@@ -190,7 +190,7 @@ The only persistent output in a fresh output directory is
 - the resolved configuration and effective trainer arguments;
 - every case's metrics, status, alignment metadata, early-stopping result, and timing;
 - the case-by-metric matrix as JSON arrays (`case_names`, `metric_names`, and `values`);
-- aggregate metric mean/std/min/max values;
+- aggregate metric mean/std/standard-error/min/max values and finite sample counts;
 - optimization-only, reconstruction-wall, metrics, and total-case timing summaries;
 - average seconds per completed case and estimated full/remaining split time.
 

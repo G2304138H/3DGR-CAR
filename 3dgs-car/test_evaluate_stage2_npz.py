@@ -11,6 +11,7 @@ import numpy as np
 from evaluate_stage2_npz import (
     NpzIndex,
     compute_volume_metrics,
+    finite_descriptive_statistics,
     ground_truth_case_references,
     load_ground_truth_volume,
     load_split_case_references,
@@ -20,6 +21,8 @@ from evaluate_stage2_npz import (
     projection_offset_to_voxel_shift_zyx,
     resample_ground_truth_to_prediction_grid,
     structural_similarity_3d,
+    summarise_metrics,
+    summarise_timings,
     translate_volume_zyx,
 )
 from volume_gif import resolve_volume_isovalue
@@ -93,6 +96,16 @@ class SplitLoadingTests(unittest.TestCase):
             self.assertEqual(results["matrix"]["case_names"], ["rca_0001"])
             self.assertEqual(len(results["matrix"]["values"]), 1)
             self.assertEqual(
+                len(results["matrix"]["column_standard_error"]),
+                len(results["matrix"]["metric_names"]),
+            )
+            self.assertTrue(
+                all(
+                    value is None
+                    for value in results["matrix"]["column_standard_error"]
+                )
+            )
+            self.assertEqual(
                 results["cases"][0]["optimization_elapsed_seconds"],
                 12.5,
             )
@@ -134,6 +147,48 @@ class SplitLoadingTests(unittest.TestCase):
         np.testing.assert_array_equal(
             validate_view_indices([0, 2, 4, 6], 7),
             [0, 2, 4, 6],
+        )
+
+    def test_metric_and_timing_summaries_record_standard_error(self):
+        records = []
+        for value in (1.0, 2.0, 3.0):
+            record = {
+                "status": "completed",
+                **{name: value for name in (
+                    "masked_dice_3d",
+                    "mse_3d",
+                    "ssim_3d",
+                    "masked_mse",
+                    "masked_mae",
+                    "masked_psnr",
+                    "masked_ssim_3d",
+                )},
+                "case_wall_time_seconds": value,
+                "reconstruction_wall_time_seconds": value,
+                "optimization_elapsed_seconds": value,
+                "metrics_wall_time_seconds": value,
+            }
+            records.append(record)
+
+        expected_standard_error = 1.0 / np.sqrt(3.0)
+        direct = finite_descriptive_statistics(np.asarray([1.0, 2.0, 3.0]))
+        self.assertAlmostEqual(direct["mean"], 2.0)
+        self.assertAlmostEqual(direct["std"], np.sqrt(2.0 / 3.0))
+        self.assertAlmostEqual(direct["standard_error"], expected_standard_error)
+
+        metric_summary = summarise_metrics(records, "test")
+        self.assertAlmostEqual(
+            metric_summary["metrics"]["masked_dice_3d"]["standard_error"],
+            expected_standard_error,
+        )
+        timing_summary = summarise_timings(records, 3)
+        self.assertAlmostEqual(
+            timing_summary["case_wall_time_seconds"]["standard_error"],
+            expected_standard_error,
+        )
+        self.assertAlmostEqual(
+            timing_summary["average_case_seconds_standard_error"],
+            expected_standard_error,
         )
 
     def test_nested_validation_alias_and_records(self):
