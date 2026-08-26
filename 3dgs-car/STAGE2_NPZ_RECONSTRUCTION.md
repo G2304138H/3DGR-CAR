@@ -63,3 +63,32 @@ Two Stage-2 clinical views are neither dense nor generally co-circular, so the
 FDK result is only a rough Gaussian initialization and will contain artifacts.
 Use `--init-method bp` only if the installed ASTRA version rejects FDK for the
 two cone-vector views.
+
+## Minimal Python environment (CUDA 12.4 driver)
+
+The Stage-2 path does not require ODL or a locally installed CUDA compiler. If
+`simple-knn` is unavailable, Gaussian initialization uses a one-time chunked
+PyTorch nearest-neighbour calculation instead.
+
+```bash
+python3 -m venv /home/renyu/vir_env/3dgr-car
+source /home/renyu/vir_env/3dgr-car/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+cd /path/to/3DGR-CAR/3dgs-car
+python -m pip install -r requirements-stage2.txt
+```
+
+Verify the GPU packages with:
+
+```bash
+python - <<'PY'
+import astra
+import torch
+print("PyTorch:", torch.__version__)
+print("PyTorch CUDA:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+print("GPU:", torch.cuda.get_device_name(0))
+print("ASTRA:", astra.__version__)
+PY
+```

@@ -6,11 +6,46 @@ import os
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH
-from simple_knn._C import distCUDA2
+try:
+    from simple_knn._C import distCUDA2 as _dist_cuda2
+except (ImportError, OSError):
+    _dist_cuda2 = None
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 import time
 import torch.nn.functional as F
+
+
+def distCUDA2(points, chunk_size=1024):
+    """Nearest-neighbour squared distance with an optional simple-knn fast path.
+
+    The original implementation required compiling ``simple-knn`` with nvcc.
+    The Stage-2 pipeline only calls this during Gaussian initialization, so a
+    chunked PyTorch fallback keeps the environment wheel-only at the cost of a
+    slightly slower one-time initialization.
+    """
+    if _dist_cuda2 is not None:
+        return _dist_cuda2(points)
+
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(f"Expected point coordinates with shape [N,3], got {points.shape}.")
+    num_points = int(points.shape[0])
+    if num_points < 2:
+        return torch.full(
+            (num_points,), 1.0e-7, dtype=points.dtype, device=points.device
+        )
+
+    nearest_squared = torch.empty(
+        (num_points,), dtype=points.dtype, device=points.device
+    )
+    for start in range(0, num_points, int(chunk_size)):
+        end = min(start + int(chunk_size), num_points)
+        distances = torch.cdist(points[start:end], points, p=2).square()
+        local_rows = torch.arange(end - start, device=points.device)
+        global_columns = torch.arange(start, end, device=points.device)
+        distances[local_rows, global_columns] = torch.inf
+        nearest_squared[start:end] = distances.min(dim=1).values
+    return nearest_squared
 
 
 class GaussianModelAnisotropic:

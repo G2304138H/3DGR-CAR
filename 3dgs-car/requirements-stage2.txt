@@ -1,0 +1,7 @@
+# Minimal dependencies for train_stage2_npz.py. PyTorch is installed separately
+# from its CUDA 12.4 wheel index; ODL and simple-knn are intentionally omitted.
+numpy>=1.26,<3
+astra-toolbox==2.5.0
+plyfile>=1.1,<2
+nibabel>=5.2,<6
+matplotlib>=3.8,<4
