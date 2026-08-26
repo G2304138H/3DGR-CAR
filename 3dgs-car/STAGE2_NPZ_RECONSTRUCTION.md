@@ -108,7 +108,8 @@ python evaluate_stage2_npz.py \
   --view-indices 0 1 \
   --iterations 8000 \
   --log-every 100 \
-  --early-stop-checks 7
+  --early-stop-checks 7 \
+  --prediction-threshold-percentile 97
 ```
 
 Options not recognised by the evaluator, such as `--view-indices`,
@@ -193,11 +194,17 @@ outputs are wanted.
 
 Reported scalars include masked 3D Dice, full-volume 3D MSE and SSIM, and
 masked MSE/MAE/PSNR/SSIM. Dice compares thresholded prediction and GT masks;
-the default threshold is `> 0`, matching the original repository's voxel Dice.
-Use `--prediction-threshold` and `--ground-truth-threshold` to change it. By
-default, other masked metrics use GT foreground voxels; `--metric-mask union`
-or `--metric-mask all` changes that region. If a GT NPZ contains a separate ROI,
-`--evaluation-mask-key <key>` restricts all mask comparisons to that ROI.
+by default, each prediction uses P97 of its strictly positive raw voxel values,
+the same per-case isovalue rule used by `reconstructed_volume.gif`. The final
+JSON records both P97 and the resulting numeric threshold for every case. The
+binary GT mask defaults to `GT > 0` (`GT > 0.5` is equivalent for `{0,1}` GT).
+Use `--prediction-threshold VALUE` to replace P97 with an absolute threshold on
+the normalized prediction, or `--prediction-threshold-percentile P` to choose a
+different positive-voxel percentile. Use `--ground-truth-threshold` to change
+the GT threshold. By default, other masked metrics use GT foreground voxels;
+`--metric-mask union` or `--metric-mask all` changes that region. If a GT NPZ
+contains a separate ROI, `--evaluation-mask-key <key>` restricts all mask
+comparisons to that ROI.
 
 FDK is mathematically designed for a circular, densely sampled cone-beam scan.
 Two Stage-2 clinical views are neither dense nor generally co-circular, so the

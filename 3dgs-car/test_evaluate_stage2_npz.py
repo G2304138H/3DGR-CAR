@@ -16,6 +16,7 @@ from evaluate_stage2_npz import (
     load_split_case_references,
     main,
     parse_args,
+    positive_percentile_threshold,
     projection_offset_to_voxel_shift_zyx,
     resample_ground_truth_to_prediction_grid,
     structural_similarity_3d,
@@ -105,6 +106,8 @@ class SplitLoadingTests(unittest.TestCase):
         ]
         args, _ = parse_args(required)
         self.assertEqual(args.early_stop_checks, 7)
+        self.assertIsNone(args.prediction_threshold)
+        self.assertEqual(args.prediction_threshold_percentile, 97.0)
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 parse_args([*required, "--early-stop-checks", "0"])
@@ -157,6 +160,41 @@ class SplitLoadingTests(unittest.TestCase):
 
 
 class MetricTests(unittest.TestCase):
+    def test_p97_prediction_mask_matches_gif_positive_percentile_rule(self):
+        prediction = np.zeros((10, 10, 10), dtype=np.float32)
+        prediction.reshape(-1)[:100] = np.arange(1, 101, dtype=np.float32)
+        threshold = positive_percentile_threshold(prediction, 97.0)
+        ground_truth = (prediction > threshold).astype(np.float32)
+
+        metrics, arrays = compute_volume_metrics(
+            prediction,
+            ground_truth,
+            prediction_threshold=0.0,
+            prediction_threshold_percentile=97.0,
+            ground_truth_threshold=0.0,
+            normalisation="clamp",
+            metric_mask="ground-truth",
+            roi_mask=None,
+            ssim_window_size=7,
+        )
+
+        self.assertAlmostEqual(threshold, 97.03, places=2)
+        self.assertEqual(metrics["prediction_threshold_mode"], "positive-percentile")
+        self.assertEqual(metrics["prediction_threshold_domain"], "raw_prediction")
+        self.assertEqual(metrics["prediction_foreground_voxels"], 3)
+        self.assertAlmostEqual(metrics["masked_dice_3d"], 1.0)
+        np.testing.assert_array_equal(
+            arrays["prediction_mask_zyx"],
+            arrays["ground_truth_mask_zyx"],
+        )
+
+    def test_p97_keeps_binary_foreground_above_threshold(self):
+        volume = np.zeros((9, 9, 9), dtype=np.float32)
+        volume[3:6, 3:6, 3:6] = 1.0
+        threshold = positive_percentile_threshold(volume, 97.0)
+        self.assertLess(threshold, 1.0)
+        self.assertEqual(np.count_nonzero(volume > threshold), 27)
+
     def test_imagecas_vol_and_spacing_are_loaded_as_physical_xyz(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mask.npz"

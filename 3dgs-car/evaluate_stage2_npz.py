@@ -25,6 +25,8 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from volume_gif import DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
+
 
 VOLUME_KEY_CANDIDATES = (
     "vol",
@@ -650,6 +652,46 @@ def normalise_volumes(
     )
 
 
+def positive_percentile_threshold(volume: np.ndarray, percentile: float) -> float:
+    """Return the GIF-style isovalue from strictly positive raw voxels."""
+    percentile = float(percentile)
+    if not 0.0 <= percentile < 100.0:
+        raise ValueError(
+            f"Positive-voxel percentile must be in [0, 100), got {percentile}."
+        )
+    values = np.nan_to_num(
+        np.asarray(volume, dtype=np.float32),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    value_min = float(values.min())
+    value_max = float(values.max())
+    if value_max <= value_min:
+        raise ValueError(
+            "Cannot select a positive-percentile prediction threshold from a "
+            "constant volume."
+        )
+    positive = values[values > 0.0]
+    if positive.size == 0:
+        raise ValueError(
+            "Cannot select a positive-percentile prediction threshold because "
+            "the prediction has no positive voxels."
+        )
+    threshold = float(np.percentile(positive, percentile))
+    # Mirror volume_gif.py: keep the level strictly inside the data range so a
+    # binary or quantized prediction still has foreground above the threshold.
+    threshold = max(
+        threshold,
+        float(np.nextafter(np.float32(value_min), np.float32(value_max))),
+    )
+    threshold = min(
+        threshold,
+        float(np.nextafter(np.float32(value_max), np.float32(value_min))),
+    )
+    return threshold
+
+
 def _box_mean_valid(volume: np.ndarray, window_size: int) -> np.ndarray:
     values = np.asarray(volume, dtype=np.float64)
     integral = np.pad(values, ((1, 0), (1, 0), (1, 0)), mode="constant")
@@ -739,6 +781,7 @@ def compute_volume_metrics(
     metric_mask: str,
     roi_mask: Optional[np.ndarray],
     ssim_window_size: int,
+    prediction_threshold_percentile: Optional[float] = None,
 ) -> Tuple[Dict[str, object], Dict[str, np.ndarray]]:
     prediction = _squeeze_volume(prediction, "prediction volume")
     ground_truth = _squeeze_volume(ground_truth, "ground-truth volume")
@@ -760,7 +803,19 @@ def compute_volume_metrics(
     prediction_eval, ground_truth_eval, data_range = normalise_volumes(
         prediction, ground_truth, normalisation
     )
-    prediction_mask = (prediction_eval > float(prediction_threshold)) & roi
+    if prediction_threshold_percentile is None:
+        applied_prediction_threshold = float(prediction_threshold)
+        prediction_threshold_mode = "absolute"
+        prediction_threshold_domain = "normalised_prediction"
+        prediction_mask = (prediction_eval > applied_prediction_threshold) & roi
+    else:
+        applied_prediction_threshold = positive_percentile_threshold(
+            prediction,
+            prediction_threshold_percentile,
+        )
+        prediction_threshold_mode = "positive-percentile"
+        prediction_threshold_domain = "raw_prediction"
+        prediction_mask = (prediction > applied_prediction_threshold) & roi
     ground_truth_mask = (ground_truth_eval > float(ground_truth_threshold)) & roi
     intersection_count = int(np.count_nonzero(prediction_mask & ground_truth_mask))
     prediction_count = int(np.count_nonzero(prediction_mask))
@@ -826,6 +881,15 @@ def compute_volume_metrics(
         "roi_voxels": int(np.count_nonzero(roi)),
         "total_voxels": int(prediction.size),
         "volume_shape_zyx": list(prediction.shape),
+        "prediction_threshold": float(applied_prediction_threshold),
+        "prediction_threshold_mode": prediction_threshold_mode,
+        "prediction_threshold_domain": prediction_threshold_domain,
+        "prediction_threshold_percentile": (
+            None
+            if prediction_threshold_percentile is None
+            else float(prediction_threshold_percentile)
+        ),
+        "ground_truth_threshold": float(ground_truth_threshold),
         "ssim_data_range": float(data_range),
         "ssim_window_size": int(ssim_window_size),
     }
@@ -1012,6 +1076,9 @@ def write_aggregate_reports(
         "reconstruction_volume",
         "evaluation_arrays",
         "prediction_threshold",
+        "prediction_threshold_mode",
+        "prediction_threshold_domain",
+        "prediction_threshold_percentile",
         "ground_truth_threshold",
         "normalisation",
         "metric_mask",
@@ -1199,7 +1266,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
             "it is read from each reconstruction's run_metadata.json."
         ),
     )
-    parser.add_argument("--prediction-threshold", type=float, default=0.0)
+    prediction_threshold_group = parser.add_mutually_exclusive_group()
+    prediction_threshold_group.add_argument(
+        "--prediction-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Use a fixed threshold on the normalised prediction instead of the "
+            "default GIF-matched positive-voxel percentile."
+        ),
+    )
+    prediction_threshold_group.add_argument(
+        "--prediction-threshold-percentile",
+        type=float,
+        default=None,
+        help=(
+            "Per-case percentile of strictly positive raw prediction voxels; "
+            "defaults to P97, matching reconstructed_volume.gif."
+        ),
+    )
     parser.add_argument("--ground-truth-threshold", type=float, default=0.0)
     parser.add_argument(
         "--normalisation",
@@ -1273,6 +1358,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
             "--early-stop-checks must be positive; split evaluation requires "
             "early stopping for every optimized case."
         )
+    if args.prediction_threshold is None and args.prediction_threshold_percentile is None:
+        args.prediction_threshold_percentile = float(
+            DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
+        )
+    if (
+        args.prediction_threshold_percentile is not None
+        and not 0.0 <= args.prediction_threshold_percentile < 100.0
+    ):
+        parser.error("--prediction-threshold-percentile must be in [0, 100).")
     return args, training_args
 
 
@@ -1534,12 +1628,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             metrics, arrays = compute_volume_metrics(
                 prediction,
                 ground_truth,
-                prediction_threshold=args.prediction_threshold,
+                prediction_threshold=(
+                    0.0
+                    if args.prediction_threshold is None
+                    else args.prediction_threshold
+                ),
                 ground_truth_threshold=args.ground_truth_threshold,
                 normalisation=args.normalisation,
                 metric_mask=args.metric_mask,
                 roi_mask=roi_mask,
                 ssim_window_size=args.ssim_window_size,
+                prediction_threshold_percentile=(
+                    args.prediction_threshold_percentile
+                ),
             )
             arrays["projection_center_offset_xyz_m"] = offset_xyz_m.astype(np.float64)
             arrays["applied_prediction_shift_zyx_voxels"] = (
@@ -1557,8 +1658,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record.update(
                 {
                     "status": "completed",
-                    "prediction_threshold": float(args.prediction_threshold),
-                    "ground_truth_threshold": float(args.ground_truth_threshold),
                     "normalisation": args.normalisation,
                     "metric_mask": args.metric_mask,
                     "ground_truth_axis_order_requested": (
@@ -1645,6 +1744,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             print(
                 f"  Dice={float(record['masked_dice_3d']):.6f} "
+                f"(prediction {record['prediction_threshold_mode']} "
+                f"threshold={float(record['prediction_threshold']):.7g}) "
                 f"SSIM={float(record['ssim_3d']):.6f} "
                 f"masked SSIM={float(record['masked_ssim_3d']):.6f} "
                 f"case time={float(record['case_wall_time_seconds']):.1f}s",
