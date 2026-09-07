@@ -92,6 +92,14 @@ view reprojection. See
 [3dgs-car/STAGE2_NPZ_RECONSTRUCTION.md](3dgs-car/STAGE2_NPZ_RECONSTRUCTION.md)
 for the data contract and commands.
 
+## Monocular Gaussian center predictor
+
+The learned initialization stage can be trained on paired Stage-2 projections
+and ground-truth vessel volumes, then used as an opt-in replacement for FDK/BP
+initialization. See
+[3dgs-car/GCP_TRAINING.md](3dgs-car/GCP_TRAINING.md) for the data contract,
+training command, and reconstruction workflow.
+
 
 ## 🤝Acknowledgement
 

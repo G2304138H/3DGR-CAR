@@ -24,7 +24,7 @@ def distCUDA2(points, chunk_size=1024):
     chunked PyTorch fallback keeps the environment wheel-only at the cost of a
     slightly slower one-time initialization.
     """
-    if _dist_cuda2 is not None:
+    if _dist_cuda2 is not None and points.is_cuda:
         return _dist_cuda2(points)
 
     if points.ndim != 2 or points.shape[1] != 3:
@@ -236,6 +236,91 @@ class GaussianModelAnisotropic:
         self._density = nn.Parameter(densities.requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
+
+    def create_from_predicted_centers(
+        self,
+        centers,
+        ini_density=0.04,
+        ini_sigma=0.01,
+        spatial_lr_scale=1.0,
+        scale_from_nearest_neighbour=True,
+    ):
+        """Initialize Gaussians from GCP centers in normalized ZYX coordinates.
+
+        Unlike the legacy point-cloud initializer, this method stores density
+        and scale in the inverse-sigmoid parameterization used by this model.
+        It is device-agnostic so its validation and activation round trips are
+        also testable on CPU.
+        """
+        if not torch.is_tensor(centers):
+            centers = torch.as_tensor(centers, dtype=torch.float32)
+        if centers.ndim == 3 and centers.shape[0] == 1:
+            centers = centers[0]
+        if centers.ndim != 2 or centers.shape[1] != 3:
+            raise ValueError(
+                "Predicted centers must have shape [N,3] or [1,N,3], got "
+                f"{tuple(centers.shape)}."
+            )
+        if not centers.is_floating_point():
+            centers = centers.float()
+        else:
+            centers = centers.to(dtype=torch.float32)
+
+        finite = torch.isfinite(centers).all(dim=1)
+        if not bool(finite.all()):
+            centers = centers[finite]
+        if centers.shape[0] == 0:
+            raise ValueError("Predicted centers contain no finite points.")
+
+        density_value = float(ini_density)
+        sigma_value = float(ini_sigma)
+        if not 0.0 < density_value < 1.0:
+            raise ValueError("ini_density must be strictly between 0 and 1.")
+        if not 0.0 < sigma_value < 1.0:
+            raise ValueError("ini_sigma must be strictly between 0 and 1.")
+
+        # The lifting function is expected to produce points in the cube.  A
+        # final clamp handles bounded network offsets at the faces without
+        # permitting invalid coordinates into the Gaussian sampler.
+        points = centers.detach().clamp(0.0, 1.0).contiguous()
+        self.spatial_lr_scale = float(spatial_lr_scale)
+
+        if bool(scale_from_nearest_neighbour) and points.shape[0] > 1:
+            nearest_scale = torch.sqrt(
+                torch.clamp_min(distCUDA2(points).float(), 1.0e-12)
+            )
+            activated_scale = torch.clamp_min(nearest_scale, sigma_value)
+        else:
+            activated_scale = torch.full(
+                (points.shape[0],),
+                sigma_value,
+                dtype=points.dtype,
+                device=points.device,
+            )
+        activation_epsilon = torch.finfo(points.dtype).eps
+        activated_scale = activated_scale.clamp(
+            activation_epsilon, 1.0 - activation_epsilon
+        )
+        scales = self.scaling_inverse_activation(activated_scale)[..., None].repeat(1, 3)
+
+        activated_density = torch.full(
+            (points.shape[0], 1),
+            density_value,
+            dtype=points.dtype,
+            device=points.device,
+        )
+        densities = self.inverse_density_activation(activated_density)
+
+        rotations = torch.zeros(
+            (points.shape[0], 4), dtype=points.dtype, device=points.device
+        )
+        rotations[:, 0] = 1.0
+
+        print("Number of points at initialisation: ", points.shape[0])
+        self._xyz = nn.Parameter(points.requires_grad_(True))
+        self._density = nn.Parameter(densities.requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rotations.requires_grad_(True))
 
     def create_from_gaussians(self, pcd, densities, scales, rots, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale

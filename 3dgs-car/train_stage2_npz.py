@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Reconstruct one Stage-2 NPZ case with FDK-initialized 3D Gaussians.
+"""Reconstruct one Stage-2 NPZ case with initialized 3D Gaussians.
 
 This entry point is deliberately separate from ``train.py``.  The released demo
 uses a one-angle circular ODL geometry and synthesizes its own projections from
 a ground-truth volume.  Stage-2 NPZ files instead contain binary masks rendered
 with arbitrary two-angle camera poses.  Here those poses are represented as
-ASTRA ``cone_vec`` geometry, used consistently for FDK, optimization, and novel
-view rendering.
+ASTRA ``cone_vec`` geometry, used consistently for initialization, optimization,
+and novel-view rendering.
 """
 
 from __future__ import annotations
@@ -294,6 +294,193 @@ def silhouette_from_line_integrals(line_integrals: torch.Tensor, gain: float) ->
     return 1.0 - torch.exp(-float(gain) * torch.clamp(line_integrals, min=0.0))
 
 
+def select_gcp_initialization_view(view_indices: Sequence[int]) -> int:
+    """Return the one view used by the monocular GCP."""
+    flattened = np.asarray(view_indices, dtype=np.int64).reshape(-1)
+    if flattened.size == 0:
+        raise ValueError("At least one view index is required for GCP initialization.")
+    return int(flattened[0])
+
+
+def resolve_projection_loss_alpha(
+    init_method: str,
+    requested_alpha: Optional[float],
+) -> float:
+    """Resolve the global-MSE weight without changing legacy FDK/BP defaults."""
+    alpha = (
+        (0.5 if str(init_method) == "gcp" else 1.0)
+        if requested_alpha is None
+        else float(requested_alpha)
+    )
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("projection loss alpha must be in [0, 1].")
+    return alpha
+
+
+def build_centerline_skeleton_masks(
+    target: torch.Tensor,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+    """Skeletonize binary 2D targets once and return masks on ``target.device``."""
+    if target.ndim != 4:
+        raise ValueError(
+            f"Projection target must have shape [B,V,H,W], got {tuple(target.shape)}."
+        )
+    try:
+        from skimage.morphology import skeletonize
+    except ImportError as error:
+        raise RuntimeError(
+            "scikit-image is required when the centerline-weighted projection "
+            "loss is enabled. Install requirements-stage2.txt or set "
+            "--projection-loss-alpha 1."
+        ) from error
+
+    binary = target.detach().cpu().numpy() > float(threshold)
+    skeletons = np.zeros_like(binary, dtype=np.float32)
+    for batch_index in range(binary.shape[0]):
+        for view_index in range(binary.shape[1]):
+            skeletons[batch_index, view_index] = skeletonize(
+                binary[batch_index, view_index]
+            ).astype(np.float32)
+    return torch.from_numpy(skeletons).to(
+        device=target.device, dtype=target.dtype
+    )
+
+
+def masked_centerline_mse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    centerline_masks: torch.Tensor,
+) -> torch.Tensor:
+    """Mean squared residual over centerline pixels only."""
+    if prediction.shape != target.shape or prediction.shape != centerline_masks.shape:
+        raise ValueError(
+            "Prediction, target, and centerline masks must have identical shapes, got "
+            f"{tuple(prediction.shape)}, {tuple(target.shape)}, and "
+            f"{tuple(centerline_masks.shape)}."
+        )
+    mask = centerline_masks.to(dtype=prediction.dtype)
+    denominator = mask.sum()
+    if float(denominator.detach().item()) <= 0.0:
+        return F.mse_loss(prediction, target)
+    return ((prediction - target).square() * mask).sum() / denominator
+
+
+def projection_reconstruction_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    alpha: float,
+    centerline_masks: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Combine image MSE and the paper's centerline-weighted MSE term."""
+    alpha = float(alpha)
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be in [0, 1].")
+    image_mse = F.mse_loss(prediction, target)
+    if alpha == 1.0:
+        return image_mse, image_mse, image_mse
+    if centerline_masks is None:
+        raise ValueError("centerline_masks are required when alpha is less than 1.")
+    centerline_mse = masked_centerline_mse(
+        prediction, target, centerline_masks
+    )
+    total = alpha * image_mse + (1.0 - alpha) * centerline_mse
+    return total, image_mse, centerline_mse
+
+
+@torch.no_grad()
+def predict_gcp_initial_centers(
+    *,
+    checkpoint_path: str | Path,
+    case: Stage2ProjectionCase,
+    view_indices: Sequence[int],
+    volume_extent_m: float,
+    device: torch.device,
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    """Run the monocular GCP on exactly the first selected Stage-2 view."""
+    # These imports are intentionally lazy: legacy FDK/BP runs should not load
+    # the learned initializer or its target-generation helpers.
+    from gcp_model import lift_depth_offsets_to_centers, load_gcp_checkpoint
+    from gcp_targets import (
+        detector_ray_box_intersections,
+        scale_cone_vector_for_detector,
+    )
+
+    initialization_view_index = select_gcp_initialization_view(view_indices)
+    checkpoint = Path(checkpoint_path).expanduser().resolve()
+    model = load_gcp_checkpoint(checkpoint, device=device)
+    input_size = int(model.config.image_size)
+    if int(model.config.in_channels) != 1:
+        raise ValueError(
+            "Stage-2 GCP initialization requires a one-channel checkpoint, got "
+            f"in_channels={model.config.in_channels}."
+        )
+
+    image = torch.as_tensor(
+        np.ascontiguousarray(case.images[initialization_view_index]),
+        dtype=torch.float32,
+        device=device,
+    ).unsqueeze(0).unsqueeze(0)
+    original_detector_shape = tuple(int(value) for value in image.shape[-2:])
+    if original_detector_shape != (input_size, input_size):
+        image = F.interpolate(
+            image,
+            size=(input_size, input_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    prediction = model(image)
+    output_shape = tuple(int(value) for value in prediction["depth"].shape[-2:])
+    original_cone_vector = case.cone_vectors(
+        np.asarray([initialization_view_index], dtype=np.int64)
+    )[0]
+    output_cone_vector = scale_cone_vector_for_detector(
+        original_cone_vector,
+        original_shape=original_detector_shape,
+        target_shape=output_shape,
+    )
+    entry_zyx, exit_zyx, valid_mask = detector_ray_box_intersections(
+        output_cone_vector,
+        detector_shape=output_shape,
+        volume_extent_m=float(volume_extent_m),
+    )
+    prediction_dtype = prediction["depth"].dtype
+    entry = torch.from_numpy(entry_zyx).to(
+        device=device, dtype=prediction_dtype
+    ).unsqueeze(0)
+    exit = torch.from_numpy(exit_zyx).to(
+        device=device, dtype=prediction_dtype
+    ).unsqueeze(0)
+    centers = lift_depth_offsets_to_centers(
+        prediction, entry, exit, clamp=True
+    )[0]
+    valid = torch.from_numpy(valid_mask.reshape(-1)).to(device=device)
+    centers = centers[valid]
+    if centers.shape[0] == 0:
+        raise RuntimeError(
+            "No rays from the GCP output grid intersect the reconstruction cube. "
+            "Check the projection geometry and --volume-extent-m."
+        )
+
+    metadata = {
+        "checkpoint": str(checkpoint),
+        "initialization_view_index": int(initialization_view_index),
+        "initialization_theta_deg": float(case.theta_deg[initialization_view_index]),
+        "initialization_phi_deg": float(case.phi_deg[initialization_view_index]),
+        "source_detector_shape": list(original_detector_shape),
+        "input_shape": [input_size, input_size],
+        "input_resize_mode": "bilinear_align_corners_false",
+        "output_grid_shape": list(output_shape),
+        "valid_output_rays": int(valid.sum().item()),
+        "total_output_rays": int(valid.numel()),
+        "center_coordinate_order": "normalized_zyx",
+        "model_config": model.config.to_dict(),
+    }
+    return centers, metadata
+
+
 @torch.no_grad()
 def estimate_silhouette_gain(
     projector: AstraConeVecProjector,
@@ -519,7 +706,7 @@ def save_input_view_reprojections(
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace, OptimizationParams]:
     parser = argparse.ArgumentParser(
-        description="Run FDK-initialized 3D Gaussian reconstruction on a Stage-2 NPZ case."
+        description="Run initialized 3D Gaussian reconstruction on a Stage-2 NPZ case."
     )
     optimization = OptimizationParams(parser)
     parser.set_defaults(iterations=8000, densify_until_iter=8000)
@@ -551,10 +738,34 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     parser.add_argument("--air-threshold", type=float, default=0.05)
     parser.add_argument("--initial-density", type=float, default=0.04)
     parser.add_argument("--initial-sigma", type=float, default=0.01)
-    parser.add_argument("--init-method", choices=["fdk", "bp"], default="fdk")
+    parser.add_argument("--init-method", choices=["fdk", "bp", "gcp"], default="fdk")
+    parser.add_argument(
+        "--gcp-checkpoint",
+        default=None,
+        help=(
+            "Trained monocular Gaussian Center Predictor checkpoint. Required "
+            "when --init-method gcp; only the first --view-indices value is "
+            "used by the predictor."
+        ),
+    )
     parser.add_argument("--target-type", choices=["auto", "mask", "line-integral"], default="auto")
     parser.add_argument("--silhouette-gain", type=float, default=None)
     parser.add_argument("--silhouette-target-level", type=float, default=0.95)
+    parser.add_argument(
+        "--projection-loss-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Weight of full-image MSE; the remaining weight is centerline MSE. "
+            "Defaults to 0.5 for GCP and 1.0 for FDK/BP."
+        ),
+    )
+    parser.add_argument(
+        "--centerline-threshold",
+        type=float,
+        default=0.5,
+        help="Threshold used to binarize target projections before 2D skeletonization.",
+    )
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--early-stop-checks", type=int, default=7)
     parser.add_argument("--no-densify", action="store_true")
@@ -615,6 +826,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     )
     parser.add_argument("--gpu-index", type=int, default=0)
     args = parser.parse_args(argv)
+    if args.init_method == "gcp" and args.gcp_checkpoint is None:
+        parser.error("--gcp-checkpoint is required when --init-method gcp.")
+    if args.projection_loss_alpha is not None and not (
+        0.0 <= float(args.projection_loss_alpha) <= 1.0
+    ):
+        parser.error("--projection-loss-alpha must be in [0, 1].")
+    if not 0.0 <= float(args.centerline_threshold) <= 1.0:
+        parser.error("--centerline-threshold must be in [0, 1].")
     if args.prediction_threshold is None and args.prediction_threshold_percentile is None:
         args.prediction_threshold_percentile = float(
             DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
@@ -670,25 +889,71 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Input shape: {tuple(target.shape)}; target type: {target_type}")
     print(f"Reconstruction: {args.volume_size}^3 over {volume_extent_m:.6f} m")
 
-    initial_volume = normalize_initial_volume(
-        projector.reconstruct(target, method=str(args.init_method))
+    projection_loss_alpha = resolve_projection_loss_alpha(
+        str(args.init_method), args.projection_loss_alpha
     )
-    if not args.evaluation_cache_only:
-        np.save(
-            output_dir / "initial_fbp_volume_zyx.npy",
-            initial_volume[0].cpu().numpy(),
-        )
-
+    gcp_metadata: Optional[Dict[str, Any]] = None
+    initial_volume: Optional[torch.Tensor] = None
     gaussians = GaussianModelAnisotropic()
-    gaussians.create_from_fbp(
-        initial_volume,
-        air_threshold=float(args.air_threshold),
-        ini_density=float(args.initial_density),
-        ini_sigma=float(args.initial_sigma),
-        spatial_lr_scale=1.0,
-        num_samples=int(args.num_init_gaussians),
-    )
+    if args.init_method in {"fdk", "bp"}:
+        initial_volume = normalize_initial_volume(
+            projector.reconstruct(target, method=str(args.init_method))
+        )
+        if not args.evaluation_cache_only:
+            np.save(
+                output_dir / "initial_fbp_volume_zyx.npy",
+                initial_volume[0].cpu().numpy(),
+            )
+        gaussians.create_from_fbp(
+            initial_volume,
+            air_threshold=float(args.air_threshold),
+            ini_density=float(args.initial_density),
+            ini_sigma=float(args.initial_sigma),
+            spatial_lr_scale=1.0,
+            num_samples=int(args.num_init_gaussians),
+        )
+    else:
+        predicted_centers, gcp_metadata = predict_gcp_initial_centers(
+            checkpoint_path=str(args.gcp_checkpoint),
+            case=case,
+            view_indices=view_indices,
+            volume_extent_m=volume_extent_m,
+            device=device,
+        )
+        if not args.evaluation_cache_only:
+            np.save(
+                output_dir / "initial_gcp_centers_normalized_zyx.npy",
+                predicted_centers.detach().cpu().numpy(),
+            )
+        gaussians.create_from_predicted_centers(
+            predicted_centers,
+            ini_density=float(args.initial_density),
+            ini_sigma=float(args.initial_sigma),
+            spatial_lr_scale=1.0,
+            scale_from_nearest_neighbour=True,
+        )
+        print(
+            "GCP initialization: "
+            f"view={gcp_metadata['initialization_view_index']} "
+            f"centers={gaussians.get_gaussians_num} "
+            f"checkpoint={gcp_metadata['checkpoint']}"
+        )
+    num_initial_gaussians = int(gaussians.get_gaussians_num)
     gaussians.training_setup(optimization_group.extract(args))
+
+    grid = create_grid_3d(
+        int(args.volume_size), int(args.volume_size), int(args.volume_size), device=device
+    )
+    if initial_volume is None:
+        with torch.no_grad():
+            initial_volume = gaussians.grid_sample(
+                grid, expand=[5, 15, 15]
+            ).squeeze(-1)
+        if not args.evaluation_cache_only:
+            np.save(
+                output_dir / "initial_gcp_volume_zyx.npy",
+                initial_volume[0].detach().cpu().numpy(),
+            )
 
     silhouette_gain: Optional[float] = None
     if target_type == "mask":
@@ -704,9 +969,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(f"Silhouette gain: {silhouette_gain:.6g}")
 
-    grid = create_grid_3d(
-        int(args.volume_size), int(args.volume_size), int(args.volume_size), device=device
-    )
+    centerline_masks: Optional[torch.Tensor] = None
+    if projection_loss_alpha < 1.0:
+        centerline_masks = build_centerline_skeleton_masks(
+            target, threshold=float(args.centerline_threshold)
+        )
+        print(
+            "Projection loss: "
+            f"alpha={projection_loss_alpha:.6g} "
+            f"centerline_pixels={int(centerline_masks.sum().item())}"
+        )
+    else:
+        print("Projection loss: full-image MSE (alpha=1)")
+
     best_loss = float("inf")
     best_iteration = -1
     best_state: Optional[Dict[str, torch.Tensor]] = None
@@ -731,7 +1006,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         else:
             prediction = predicted_line_integrals
-        loss = F.mse_loss(prediction, target)
+        loss, image_mse, centerline_mse = projection_reconstruction_loss(
+            prediction,
+            target,
+            alpha=projection_loss_alpha,
+            centerline_masks=centerline_masks,
+        )
         loss.backward()
 
         if (
@@ -752,9 +1032,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         should_check = iteration == 0 or (iteration + 1) % int(args.log_every) == 0
         if should_check:
             loss_value = float(loss.detach().item())
-            psnr = -10.0 * math.log10(max(loss_value, 1.0e-12))
+            image_mse_value = float(image_mse.detach().item())
+            centerline_mse_value = float(centerline_mse.detach().item())
+            psnr = -10.0 * math.log10(max(image_mse_value, 1.0e-12))
             print(
                 f"iteration={iteration + 1} loss={loss_value:.7g} "
+                f"image_mse={image_mse_value:.7g} "
+                f"centerline_mse={centerline_mse_value:.7g} "
                 f"psnr={psnr:.3f} gaussians={gaussians.get_gaussians_num}"
             )
             if loss_value < best_loss:
@@ -783,6 +1067,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "cuda_synchronized": True,
             "sample_name": case.sample_name,
             "view_indices": view_indices.tolist(),
+            "init_method": str(args.init_method),
+            "gcp_initialization_view_index": (
+                None
+                if gcp_metadata is None
+                else int(gcp_metadata["initialization_view_index"])
+            ),
+            "projection_loss_alpha": float(projection_loss_alpha),
             "iterations_requested": int(args.iterations),
             "iterations_completed": int(optimization_iterations_completed),
             "early_stopped": bool(
@@ -791,7 +1082,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "elapsed_seconds": optimization_elapsed_seconds,
             "seconds_per_iteration": optimization_seconds_per_iteration,
             "volume_size": int(args.volume_size),
-            "num_initial_gaussians": int(args.num_init_gaussians),
+            "num_initial_gaussians": int(num_initial_gaussians),
             "num_gaussians_after_optimization": int(gaussians.get_gaussians_num),
             "densification_enabled": bool(not args.no_densify),
             "gpu_index": int(args.gpu_index),
@@ -950,6 +1241,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "phi_deg": case.phi_deg[view_indices].tolist(),
         "target_type": target_type,
         "init_method": str(args.init_method),
+        "requested_num_init_gaussians": int(args.num_init_gaussians),
+        "num_initial_gaussians": int(num_initial_gaussians),
+        "air_threshold": float(args.air_threshold),
+        "initial_density": float(args.initial_density),
+        "initial_sigma": float(args.initial_sigma),
+        "scale_from_nearest_neighbour": bool(args.init_method == "gcp"),
+        "gcp": gcp_metadata,
+        "gcp_checkpoint": (
+            None if gcp_metadata is None else str(gcp_metadata["checkpoint"])
+        ),
+        "gcp_initialization_view_index": (
+            None
+            if gcp_metadata is None
+            else int(gcp_metadata["initialization_view_index"])
+        ),
+        "projection_loss_alpha_requested": args.projection_loss_alpha,
+        "projection_loss_alpha": float(projection_loss_alpha),
+        "projection_loss_formula": (
+            "alpha * full_image_mse + (1 - alpha) * centerline_masked_mse"
+        ),
+        "centerline_threshold": float(args.centerline_threshold),
+        "centerline_mask_pixels": (
+            None
+            if centerline_masks is None
+            else int(centerline_masks.sum().item())
+        ),
         "volume_size": int(args.volume_size),
         "volume_extent_m": float(volume_extent_m),
         "source_origin_distance_m": float(case.source_origin_distance_m),

@@ -2,14 +2,20 @@
 
 `train_stage2_npz.py` reads the Stage-2 ImageCAS NPZ format directly, selects
 one or more stored views, creates an ASTRA `cone_vec` geometry from their `theta_deg`
-and `phi_deg`, runs FDK initialization, optimizes the 3D Gaussians for that
-case, and exports the Gaussian parameters, reconstructed volume, and remaining
-novel views.
+and `phi_deg`, initializes with FDK/BP or a trained monocular Gaussian Center
+Predictor (GCP), optimizes the 3D Gaussians for that case, and exports the
+Gaussian parameters, reconstructed volume, and remaining novel views.
 
 The stored `images` are binary artery silhouettes, not CT line integrals.  The
 script therefore compares them to `1 - exp(-gain * line_integral)` during
-optimization.  The gain is estimated from the FDK initialization unless
-`--silhouette-gain` is supplied.
+optimization. The gain is estimated from the selected method's initialization
+volume unless `--silhouette-gain` is supplied.
+
+In GCP mode, **only the first index passed to `--view-indices`** enters the
+monocular predictor. All selected views still enter the subsequent projection
+optimization. For example, `--view-indices 3 5` means view 3 initializes the
+centres while views 3 and 5 both constrain the reconstruction; predictions from
+multiple GCP runs are not fused.
 
 ## Example
 
@@ -23,6 +29,33 @@ python train_stage2_npz.py \
   --iterations 8000 \
   --prediction-threshold-percentile 97
 ```
+
+To use a trained monocular GCP instead of FDK:
+
+```bash
+python train_stage2_npz.py \
+  --input /Users/renyu/Desktop/lca_0001.npz \
+  --output-dir ./outputs/lca_0001_gcp_views_0_1 \
+  --view-indices 0 1 \
+  --init-method gcp \
+  --gcp-checkpoint ./outputs/gcp/best_gcp.pt \
+  --iterations 8000 \
+  --prediction-threshold-percentile 97
+```
+
+The checkpoint records its required input resolution and downsampling factor.
+The first view is resized to that resolution, and its detector geometry is
+rescaled to the GCP output grid without changing the detector field of view.
+The predicted depth and ZYX offsets are lifted along the corresponding rays
+into normalized ZYX Gaussian centres.
+
+GCP defaults to the paper-style projection objective
+`0.5 * full_image_MSE + 0.5 * centerline_masked_MSE`. The 2D centerline masks
+are computed once by skeletonizing the binary target projections; no stored 3D
+centerline is needed. Override the full-image weight with
+`--projection-loss-alpha VALUE`. FDK and BP default to `1.0`, preserving their
+previous plain-MSE behavior. `--num-init-gaussians` applies to FDK/BP; in GCP
+mode the checkpoint output grid determines the initial count.
 
 For a short smoke run before committing to the full optimization:
 
@@ -49,6 +82,8 @@ detector width projected back to isocentre; override it with
 - `gaussians.pt`: reloadable raw Gaussian state plus activated parameters and geometry.
 - `gaussians.npz`: portable centres, densities, scales, and rotations.
 - `initial_fbp_volume_zyx.npy`: normalized FDK initialization.
+- `initial_gcp_centers_normalized_zyx.npy`: monocular predictor output before Gaussian optimization (GCP mode).
+- `initial_gcp_volume_zyx.npy`: volume rendered from predicted centres before optimization (GCP mode).
 - `reconstructed_volume_zyx.npy`: final Gaussian volume in `[z,y,x]` order.
 - `reconstructed_volume_xyz.nii.gz`: final volume with millimetre voxel spacing, when nibabel is installed.
 - `reconstructed_volume.gif`: prediction-only density isosurface, synchronized to the training monitor's 24-frame, 5-FPS, fixed-22-degree camera and shared GT/prediction framing.
@@ -57,7 +92,8 @@ detector width projected back to isocentre; override it with
 - `novel_views.npz`: projections, stored targets, errors, and per-view metrics at all unselected stored views by default.
 - `novel_view_reprojections.png`: target/reprojection/error montage for the requested novel views.
 - `optimization_timing.json`: CUDA-synchronized optimizer-loop wall time and run context, when `--record-optimization-time` is enabled.
-- `run_metadata.json`: selected views and reconstruction settings.
+- `run_metadata.json`: selected views, initialization checkpoint/view, GCP
+  configuration, initial centre count, and projection-loss settings.
 
 The GIF and evaluation use the same threshold interface. The single-case
 trainer defaults to an isovalue at the 97th percentile of the reconstructed
