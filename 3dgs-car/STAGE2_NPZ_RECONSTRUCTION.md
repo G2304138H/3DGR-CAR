@@ -171,6 +171,11 @@ checks fail to improve its best checked loss. The effective setting is passed
 to every `train_stage2_npz.py` subprocess and recorded in
 `metrics/evaluation_config.json`.
 
+For a parametric-evaluator-style JSON interface that resolves a trained GCP,
+runs view-count sweeps over validation and test cases, and selects either
+`paper_metric` or `visualisation` output, use `evaluate_gcp.py`; see
+`GCP_TRAINING.md` and the templates under `configs/`.
+
 The ground-truth volume key is auto-detected from common names including `vol`,
 `volume`, `voxel`, `gt_volume`, `segmentation`, and `mask`. For the supplied
 ImageCAS format, `vol` is interpreted as `[x,y,z]`, transposed internally to

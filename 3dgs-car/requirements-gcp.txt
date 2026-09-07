@@ -1,0 +1,3 @@
+# Minimal dependencies for monocular GCP preprocessing and training.
+# Install the appropriate CUDA build of PyTorch separately from pytorch.org.
+numpy>=1.26,<3

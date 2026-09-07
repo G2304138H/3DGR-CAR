@@ -90,20 +90,7 @@ class RayTargetTests(unittest.TestCase):
         # Source and detector lie on the Z axis. U advances X columns and V
         # advances Y rows, following ASTRA cone_vec conventions.
         return np.asarray(
-            [
-                0.0,
-                0.0,
-                -2.0,
-                0.0,
-                0.0,
-                2.0,
-                1.0,
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-                0.0,
-            ],
+            [0.0, 0.0, -2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             dtype=np.float32,
         )
 
@@ -168,13 +155,17 @@ class PairAndDatasetTests(unittest.TestCase):
             )
 
             pairs = discover_case_pairs(
-                projection_dir, ground_truth_dir, case_names=["lca_0001"]
+                projection_dir,
+                ground_truth_dir,
+                case_names=["lca_0001"],
+                expected_detector_pixel_spacing_mm=10.0,
             )
 
             self.assertEqual(len(pairs), 1)
             self.assertEqual(pairs[0].projection_path, projection_path.resolve())
             self.assertEqual(pairs[0].ground_truth_path, expected_gt.resolve())
             self.assertEqual(pairs[0].case_name, "lca_0001")
+            self.assertEqual(pairs[0].expected_detector_pixel_spacing_mm, 10.0)
 
     def test_dataset_indexes_every_view_and_can_use_disk_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -216,6 +207,34 @@ class PairAndDatasetTests(unittest.TestCase):
             self.assertEqual(tuple(first["point_cloud"].shape), (1, 3))
             self.assertEqual(first["view_index"], 0)
             self.assertEqual(len(list(cache_dir.glob("*.npz"))), 1)
+
+    def test_expected_detector_spacing_is_checked_per_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            projection_path = root / "lca_0001.npz"
+            ground_truth_path = root / "1.npz"
+            _write_projection(projection_path, "lca_0001", "1", views=1)
+            volume_xyz = np.zeros((5, 5, 5), dtype=np.uint8)
+            volume_xyz[2, 2, 2] = 1
+            np.savez(
+                ground_truth_path,
+                vol=volume_xyz,
+                spacing=np.full(3, 100.0, dtype=np.float32),
+            )
+            pair = GCPCasePair(
+                projection_path,
+                ground_truth_path,
+                case_name="lca_0001",
+                vessel_type="lca",
+                case_id="1",
+                expected_detector_pixel_spacing_mm=0.65,
+            )
+            dataset = PairedGCPDataset(
+                [pair], volume_size=5, image_size=4, volume_extent_m=0.4
+            )
+
+            with self.assertRaisesRegex(ValueError, "pixel spacing"):
+                _ = dataset[0]
 
     def test_collate_pads_variable_point_clouds(self) -> None:
         if torch is None:

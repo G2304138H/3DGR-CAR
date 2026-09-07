@@ -44,7 +44,93 @@ centerline weighting directly from each target projection.
 
 The split JSON may contain top-level `train`, `validation`/`val`, and `test`
 lists or those lists nested under `splits`. Case entries may be strings or
-records with a case-name/id field.
+records with a case-name/id field. Feature-file paths are also accepted. For
+example, `.../lca/1/prefix_02.npz` is matched to `lca_0001.npz`, and
+`.../rca_0508.npz` is matched to `rca_0508.npz`.
+
+Two ready-to-run configurations are provided:
+
+- `configs/gcp_imagecas_lca.json` uses the LCA projection directory and checks
+  that every archive reports `0.65` mm detector pixels.
+- `configs/gcp_imagecas_rca.json` uses the RCA projection directory and checks
+  that every archive reports `0.55` mm detector pixels.
+
+The check does not override calibration. Ray geometry always uses the
+`imager_pixel_spacing` stored in each individual projection NPZ. The resulting
+default reconstruction extent is therefore approximately `0.1387` m for LCA
+and `0.1173` m for RCA with a 256-pixel detector, 0.75 m source-to-isocentre
+distance, and 0.9 m SID.
+
+Train separate LCA and RCA predictors with these independently generated split
+files. Combining them into one model could put the LCA and RCA of the same
+physical patient into different train/validation partitions.
+
+## Python environment on the training server
+
+Load the cluster's Python module before creating or activating the environment.
+The system `/usr/bin/python3` may not include `ensurepip`, whereas the
+module-provided interpreter normally does:
+
+```bash
+module load python3
+which python3
+python3 --version
+python3 -m venv --clear /export/home2/reny0012/vir_env/3dgr_car_gcp
+source /export/home2/reny0012/vir_env/3dgr_car_gcp/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+```
+
+If an existing environment is active, run `deactivate` before loading the
+module and creating the new environment. In later login sessions, activate the
+environment in the same way as `vesseltree`:
+
+```bash
+module load python3
+source /export/home2/reny0012/vir_env/3dgr_car_gcp/bin/activate
+```
+
+If `venv` still reports that `ensurepip` is unavailable after loading the
+module, bootstrap `virtualenv` into a private directory without sudo:
+
+```bash
+python3 -m pip --version
+python3 -m pip install --upgrade \
+  --target /export/home2/reny0012/vir_env/virtualenv_bootstrap \
+  virtualenv
+
+PYTHONPATH=/export/home2/reny0012/vir_env/virtualenv_bootstrap \
+  python3 -m virtualenv --clear --python python3 \
+  /export/home2/reny0012/vir_env/3dgr_car_gcp
+
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python -m pip install --upgrade pip setuptools wheel
+```
+
+The fallback's `--clear` flag removes the incomplete environment left by a
+failed `venv` command. Omit it when creating the environment for the first
+time.
+
+Install the CUDA build of PyTorch supported by the server driver. For the
+currently supported CUDA 12.6 wheel:
+
+```bash
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python -m pip install torch \
+  --index-url https://download.pytorch.org/whl/cu126
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python -m pip install -r requirements-gcp.txt
+```
+
+Verify the interpreter and GPU before starting a long run:
+
+```bash
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python -c \
+  "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+```
+
+GCP training itself does not require ASTRA. To use the trained checkpoint in
+the complete Stage-2 optimizer later, install the remaining pip dependencies:
+
+```bash
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python -m pip install -r requirements-stage2.txt
+```
 
 ```bash
 python train_gcp.py \
@@ -63,6 +149,28 @@ python train_gcp.py \
   --epochs 100 \
   --batch-size 1 \
   --amp
+```
+
+For the supplied server paths, run one vessel at a time from `3dgs-car`:
+
+```bash
+cd /path/to/3DGR-CAR/3dgs-car
+
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python train_gcp.py \
+  --config configs/gcp_imagecas_lca.json
+
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python train_gcp.py \
+  --config configs/gcp_imagecas_rca.json
+```
+
+CLI values override the JSON settings. For example, to select a GPU and resume
+an interrupted LCA run:
+
+```bash
+/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python train_gcp.py \
+  --config configs/gcp_imagecas_lca.json \
+  --device cuda:1 \
+  --resume /export/home2/reny0012/result/3dgr_car_gcp/lca/last_gcp.pt
 ```
 
 Outputs include `training_config.json`, `history.jsonl`, `last_gcp.pt`, and the
@@ -107,6 +215,56 @@ python evaluate_stage2_npz.py \
   --gcp-checkpoint ./outputs/gcp/best_gcp.pt \
   --iterations 8000
 ```
+
+## Config-driven validation and test evaluation
+
+`evaluate_gcp.py` is the high-level evaluation entry point. It follows the
+parametric evaluator's JSON conventions: an experiment directory plus
+`checkpoint_choice`, `evaluation_mode`, `eval_split`, `eval_num_views`, and an
+evaluation output directory. When `training_config.json` is present in the GCP
+experiment, the projection directory, ground-truth directory, and split JSON
+are inherited automatically; any non-null evaluation value overrides them.
+
+Start from one of these templates:
+
+- `configs/eval_gcp_paper_metric_template.json`
+- `configs/eval_gcp_visualisation_template.json`
+
+Then run:
+
+```bash
+python evaluate_gcp.py \
+  --config configs/eval_gcp_paper_metric_template.json
+```
+
+Use `--dry-run` first to resolve all paths, checkpoint choices, view prefixes,
+and Stage-2 arguments without starting CUDA reconstruction. The resolved files
+are saved as `resolved_config.json` and `evaluation_plan.json`.
+
+For `evaluation_mode: "paper_metric"`, every selected validation/test case is
+initialized by the GCP and optimized independently. Results are grouped by
+view count under `metrics/by_view_count/k<N>`, with parametric-style combined
+files at the root:
+
+- `performance_per_case.json`
+- `performance_summary.json`
+- `metrics/paper_metric_per_case.json` and `.csv`
+- `metrics/paper_metric_summary.json`
+- `metrics/metrics_matrix.npz`
+- `metrics/voxel_masks/manifest.json`
+
+For `evaluation_mode: "visualisation"`, the same metrics are computed and the
+full per-case Stage-2 artifact bundle is retained under
+`visualization/k<N>/cases/<case>`. This includes Gaussian checkpoints, the
+reconstructed volume and GIF, input/novel reprojections, and run metadata.
+`max_visualizations` limits full artifact generation without reducing the set
+of cases that receive optimization and metrics.
+
+`eval_num_views` may be one integer or a list such as `[1, 2]`.
+`eval_view_indices` defines the fixed order, and each view-count run uses its
+prefix: with `[3, 5]`, the one-view run uses `[3]` and the two-view run uses
+`[3, 5]`. Only the first selected view enters the monocular GCP; all selected
+views constrain the subsequent Gaussian optimization.
 
 ## Explicit reproduction choices
 

@@ -51,6 +51,7 @@ class GCPCasePair:
     case_name: str = ""
     vessel_type: Optional[str] = None
     case_id: Optional[str] = None
+    expected_detector_pixel_spacing_mm: Optional[float] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -61,6 +62,13 @@ class GCPCasePair:
             "ground_truth_path",
             Path(self.ground_truth_path).expanduser().resolve(),
         )
+        if self.expected_detector_pixel_spacing_mm is not None:
+            spacing = float(self.expected_detector_pixel_spacing_mm)
+            if not np.isfinite(spacing) or spacing <= 0.0:
+                raise ValueError(
+                    "expected_detector_pixel_spacing_mm must be finite and positive."
+                )
+            object.__setattr__(self, "expected_detector_pixel_spacing_mm", spacing)
 
 
 def _npz_scalar(archive: np.lib.npyio.NpzFile, key: str) -> Optional[str]:
@@ -171,6 +179,7 @@ def discover_case_pairs(
     projection_dir: str | Path,
     ground_truth_dir: str | Path,
     case_names: Optional[Iterable[str]] = None,
+    expected_detector_pixel_spacing_mm: Optional[float] = None,
 ) -> list[GCPCasePair]:
     """Discover projection/GT pairs from file or directory roots.
 
@@ -221,6 +230,11 @@ def discover_case_pairs(
                 case_name=sample_name,
                 vessel_type=vessel_type,
                 case_id=case_id,
+                expected_detector_pixel_spacing_mm=(
+                    None
+                    if expected_detector_pixel_spacing_mm is None
+                    else float(expected_detector_pixel_spacing_mm)
+                ),
             )
         )
 
@@ -383,6 +397,14 @@ class PairedGCPDataset(Dataset):
             str(self.pairs[pair_index].projection_path),
             source_origin_distance_m=self.source_origin_distance_m,
         )
+        expected_spacing = self.pairs[pair_index].expected_detector_pixel_spacing_mm
+        if expected_spacing is not None:
+            actual_spacing = float(case.detector_pixel_spacing_m) * 1000.0
+            if not np.isclose(actual_spacing, expected_spacing, rtol=0.0, atol=1.0e-4):
+                raise ValueError(
+                    f"{case.path}: detector pixel spacing is {actual_spacing:.6g} mm; "
+                    f"expected {float(expected_spacing):.6g} mm."
+                )
         return self._lru_insert(self._projection_lru, pair_index, case)
 
     def _aligned_case(self, pair_index: int) -> tuple[np.ndarray, np.ndarray, float]:
@@ -430,7 +452,7 @@ class PairedGCPDataset(Dataset):
             return None
         pair = self.pairs[pair_index]
         payload = {
-            "schema": 1,
+            "schema": 2,
             "projection": str(pair.projection_path),
             "projection_stat": [
                 pair.projection_path.stat().st_size,
@@ -448,6 +470,9 @@ class PairedGCPDataset(Dataset):
             "downsample_factor": self.downsample_factor,
             "max_points": self.max_points,
             "source_origin_distance_m": self.source_origin_distance_m,
+            "expected_detector_pixel_spacing_mm": (
+                pair.expected_detector_pixel_spacing_mm
+            ),
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode("utf-8")

@@ -21,6 +21,7 @@ from train_gcp import (
     _load_training_checkpoint,
     _make_grad_scaler,
     load_split_case_names,
+    parse_args,
     run_epoch,
 )
 
@@ -40,6 +41,44 @@ class SplitParsingTests(unittest.TestCase):
             path.write_text(json.dumps(document), encoding="utf-8")
             self.assertEqual(load_split_case_names(path, "train"), ["1", "lca_0002"])
             self.assertEqual(load_split_case_names(path, "val"), ["lca_0003"])
+
+    def test_feature_paths_are_converted_to_projection_case_names(self):
+        document = {
+            "train": [
+                "/features/vggt/lca/1/prefix_02.npz",
+                "/features/vggt/lca/23/prefix_05.npz",
+            ],
+            "val": ["/features/all_branch/vggt/rca_0366.npz"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "split.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            self.assertEqual(
+                load_split_case_names(path, "train"), ["lca_0001", "lca_0023"],
+            )
+            self.assertEqual(load_split_case_names(path, "val"), ["rca_0366"])
+
+    def test_config_supplies_defaults_and_cli_can_override_them(self):
+        document = {
+            "schema_version": 1,
+            "training": {
+                "projection_dir": "/projection",
+                "ground_truth_dir": "/volume",
+                "split_json": "/split.json",
+                "output_dir": "/output",
+                "expected_detector_pixel_spacing_mm": 0.65,
+                "epochs": 100,
+                "amp": True,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            args = parse_args(["--config", str(path), "--epochs", "3", "--no-amp"])
+        self.assertEqual(args.projection_dir, "/projection")
+        self.assertEqual(args.expected_detector_pixel_spacing_mm, 0.65)
+        self.assertEqual(args.epochs, 3)
+        self.assertFalse(args.amp)
 
 
 class _TinyGCPDataset(Dataset):

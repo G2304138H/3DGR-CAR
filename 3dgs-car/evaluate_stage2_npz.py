@@ -45,6 +45,9 @@ VOLUME_KEY_CANDIDATES = (
     "arr_0",
 )
 CASE_ID_KEYS = (
+    "path",
+    "file",
+    "source_path",
     "case_name",
     "sample_name",
     "case_id",
@@ -54,8 +57,6 @@ CASE_ID_KEYS = (
     "number",
     "name",
     "filename",
-    "file",
-    "path",
 )
 METRIC_NAMES = (
     "masked_dice_3d",
@@ -76,6 +77,120 @@ TIMING_NAMES = (
 
 def _normalise_key(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def _canonical_case_reference(value: object) -> str:
+    """Convert parametric feature paths to Stage-2 projection case names."""
+
+    text = str(value).strip()
+    if not text:
+        return text
+    if isinstance(value, (int, np.integer)) or text.isdigit():
+        return text
+
+    parts = [part for part in text.replace("\\", "/").split("/") if part]
+    stem = parts[-1].rsplit(".", 1)[0] if parts else text
+    direct = re.fullmatch(r"(?i)(lca|rca)[_-]?0*([0-9]+)", stem)
+    if direct is not None:
+        vessel, case_number = direct.groups()
+        return f"{vessel.lower()}_{int(case_number):04d}"
+
+    for index, part in enumerate(parts[:-1]):
+        vessel = part.lower()
+        if vessel not in {"lca", "rca"}:
+            continue
+        for child in parts[index + 1 : -1]:
+            if child.isdigit():
+                return f"{vessel}_{int(child):04d}"
+    return text
+
+
+def _optional_nonnegative_integer(value: str) -> Optional[int]:
+    """Parse an optional case/artifact limit accepted by the CLI."""
+
+    if str(value).strip().lower() == "all":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "expected a non-negative integer or 'all'"
+        ) from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(
+            "expected a non-negative integer or 'all'"
+        )
+    return parsed
+
+
+def select_case_references(
+    references: Sequence[str],
+    requested_case_ids: Optional[Sequence[str]],
+    num_cases: Optional[int],
+) -> List[str]:
+    """Apply explicit case selection and a deterministic prefix limit."""
+
+    selected = list(references)
+    if requested_case_ids is not None:
+        requested = [str(value).strip() for value in requested_case_ids]
+        if not requested or any(not value for value in requested):
+            raise ValueError("--eval-case-ids must contain non-empty identifiers.")
+        duplicate_requests = sorted(
+            value for value in set(requested) if requested.count(value) > 1
+        )
+        if duplicate_requests:
+            raise ValueError(
+                f"--eval-case-ids contains duplicates: {duplicate_requests}."
+            )
+
+        exact = {reference: reference for reference in selected}
+        normalised: Dict[str, List[str]] = {}
+        for reference in selected:
+            normalised.setdefault(_normalise_key(reference), []).append(reference)
+        resolved: List[str] = []
+        missing: List[str] = []
+        for request in requested:
+            if request in exact:
+                resolved.append(exact[request])
+                continue
+            matches = normalised.get(_normalise_key(request), [])
+            if len(matches) == 1:
+                resolved.append(matches[0])
+            elif len(matches) > 1:
+                raise ValueError(
+                    f"Evaluation case identifier {request!r} is ambiguous: {matches}."
+                )
+            else:
+                request_number = _numeric_case_id(request)
+                numeric_matches = (
+                    []
+                    if request_number is None
+                    else [
+                        reference
+                        for reference in selected
+                        if _numeric_case_id(reference) == request_number
+                    ]
+                )
+                if len(numeric_matches) == 1:
+                    resolved.append(numeric_matches[0])
+                elif len(numeric_matches) > 1:
+                    raise ValueError(
+                        f"Evaluation case identifier {request!r} is ambiguous: "
+                        f"{numeric_matches}. Use a full case name."
+                    )
+                else:
+                    missing.append(request)
+        if missing:
+            raise ValueError(
+                f"Evaluation cases are not present in the selected split: {missing}."
+            )
+        selected = resolved
+
+    if num_cases is not None:
+        selected = selected[: int(num_cases)]
+    if not selected:
+        raise ValueError("Evaluation case selection is empty.")
+    return selected
 
 
 def _split_aliases(split: str) -> set[str]:
@@ -118,7 +233,7 @@ def _case_reference_from_record(record: Mapping[object, object]) -> Optional[str
     for key in CASE_ID_KEYS:
         value = normalised_items.get(_normalise_key(key))
         if value is not None and not isinstance(value, (dict, list)):
-            return str(value)
+            return _canonical_case_reference(value)
     return None
 
 
@@ -136,7 +251,7 @@ def _case_references(value: object) -> List[str]:
                     )
                 references.append(reference)
             elif isinstance(item, (str, int, np.integer)):
-                references.append(str(item))
+                references.append(_canonical_case_reference(item))
             else:
                 raise TypeError(f"Unsupported split entry: {item!r}.")
         return references
@@ -1223,6 +1338,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
             "(validation followed by test)."
         ),
     )
+    parser.add_argument(
+        "--eval-case-ids",
+        nargs="+",
+        default=None,
+        help="Optional ordered subset of case identifiers from the selected split.",
+    )
+    parser.add_argument(
+        "--num-eval-cases",
+        type=_optional_nonnegative_integer,
+        default=None,
+        help="Evaluate only the first N selected cases; 'all' keeps every case.",
+    )
     parser.add_argument("--output-dir", required=True, help="Root for reconstructions and metric reports.")
     parser.add_argument(
         "--view-indices",
@@ -1367,6 +1494,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help="Include the valid-window 3D SSIM map in each evaluation_arrays.npz.",
     )
     parser.add_argument(
+        "--save-evaluation-arrays",
+        action="store_true",
+        help=(
+            "Persist each aligned prediction, ground truth, and binary mask even "
+            "in json-only mode. Arrays are written under voxel_masks/."
+        ),
+    )
+    parser.add_argument(
         "--output-mode",
         choices=("json-only", "full"),
         default="json-only",
@@ -1379,6 +1514,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         "--keep-case-cache",
         action="store_true",
         help="Keep temporary reconstruction/timing files after JSON-only evaluation.",
+    )
+    parser.add_argument(
+        "--max-visualizations",
+        type=_optional_nonnegative_integer,
+        default=None,
+        help=(
+            "In full mode, create complete reconstruction/visualization artifacts "
+            "for only the first N cases; 'all' (the default) creates them for all."
+        ),
     )
     parser.add_argument(
         "--skip-reconstruction",
@@ -1413,8 +1557,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         parser.error(f"Trainer options have no effect with --skip-reconstruction: {training_args}.")
     if args.ssim_window_size < 3 or args.ssim_window_size % 2 == 0:
         parser.error("--ssim-window-size must be an odd integer >= 3.")
-    if args.output_mode == "json-only" and args.save_ssim_map:
-        parser.error("--save-ssim-map requires --output-mode full.")
+    if (
+        args.output_mode == "json-only"
+        and args.save_ssim_map
+        and not args.save_evaluation_arrays
+    ):
+        parser.error(
+            "--save-ssim-map in json-only mode requires --save-evaluation-arrays."
+        )
     if args.early_stop_checks <= 0:
         parser.error(
             "--early-stop-checks must be positive; split evaluation requires "
@@ -1463,7 +1613,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ground_truth_dir = Path(args.ground_truth_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    references = load_split_case_references(split_json, args.split)
+    loaded_references = load_split_case_references(split_json, args.split)
+    reference_split_labels: Dict[str, str] = {}
+    if _normalise_key(args.split) in {"valtest", "validationtest"}:
+        for split_name, split_label in (("val", "validation"), ("test", "test")):
+            for reference in load_split_case_references(split_json, split_name):
+                reference_split_labels.setdefault(reference, split_label)
+    else:
+        normalised_split = _normalise_key(args.split)
+        split_label = (
+            "validation"
+            if normalised_split in {"val", "valid", "validation", "dev"}
+            else "train"
+            if normalised_split in {"train", "training"}
+            else "test"
+            if normalised_split in {"test", "testing"}
+            else args.split
+        )
+        reference_split_labels = {
+            reference: split_label for reference in loaded_references
+        }
+    references = select_case_references(
+        loaded_references,
+        args.eval_case_ids,
+        args.num_eval_cases,
+    )
     projection_index = NpzIndex(input_dir)
     ground_truth_index = NpzIndex(ground_truth_dir)
     training_script = Path(__file__).resolve().with_name("train_stage2_npz.py")
@@ -1491,7 +1665,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cache_created_by_run = False
         case_output_dir: Optional[Path] = None
         record: Dict[str, object] = {
-            "split": args.split,
+            "split": reference_split_labels.get(reference, args.split),
+            "evaluation_split": args.split,
             "split_case_id": reference,
             "case_name": reference,
             "status": "failed",
@@ -1545,6 +1720,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     f"existing cache: {case_output_dir}. Use a fresh output directory, "
                     "--reuse-existing, or --keep-case-cache."
                 )
+            create_visualization_artifacts = bool(
+                args.output_mode == "full"
+                and (
+                    args.max_visualizations is None
+                    or case_number <= int(args.max_visualizations)
+                )
+            )
+            record["visualization_artifacts_enabled"] = (
+                create_visualization_artifacts
+            )
+            case_training_args = list(effective_training_args)
+            if args.output_mode == "full" and not create_visualization_artifacts:
+                case_training_args.extend(("--evaluation-cache-only", "--no-volume-gif"))
             if should_train:
                 cache_created_by_run = not cache_had_files
                 reconstruction_timer_start = time.perf_counter()
@@ -1552,7 +1740,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     training_script,
                     projection_path,
                     case_output_dir,
-                    effective_training_args,
+                    case_training_args,
                 )
                 record["reconstruction_wall_time_seconds"] = float(
                     time.perf_counter() - reconstruction_timer_start
@@ -1788,16 +1976,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 time.perf_counter() - metrics_timer_start
             )
 
-            if args.output_mode == "full":
-                case_metrics_dir = (
-                    output_dir / "metrics" / "cases" / projection_path.stem
-                )
+            if args.output_mode == "full" or args.save_evaluation_arrays:
+                if args.output_mode == "full":
+                    case_metrics_dir = (
+                        output_dir / "metrics" / "cases" / projection_path.stem
+                    )
+                    arrays_path = case_metrics_dir / "evaluation_arrays.npz"
+                else:
+                    case_metrics_dir = output_dir / "voxel_masks"
+                    arrays_path = case_metrics_dir / f"{projection_path.stem}.npz"
                 case_metrics_dir.mkdir(parents=True, exist_ok=True)
-                arrays_path = case_metrics_dir / "evaluation_arrays.npz"
                 if not args.save_ssim_map:
                     arrays.pop("ssim_map_valid_zyx")
                 np.savez_compressed(arrays_path, **arrays)
                 record["evaluation_arrays"] = str(arrays_path)
+            if args.output_mode == "full":
                 write_json(case_metrics_dir / "metrics.json", record)
 
             case_cache_removed = False

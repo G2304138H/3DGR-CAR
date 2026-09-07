@@ -20,6 +20,7 @@ from evaluate_stage2_npz import (
     positive_percentile_threshold,
     projection_offset_to_voxel_shift_zyx,
     resample_ground_truth_to_prediction_grid,
+    select_case_references,
     structural_similarity_3d,
     summarise_metrics,
     summarise_timings,
@@ -30,6 +31,16 @@ from stage2_npz_data import validate_view_indices
 
 
 class SplitLoadingTests(unittest.TestCase):
+    def test_case_selection_preserves_requested_order_then_applies_limit(self):
+        self.assertEqual(
+            select_case_references(
+                ["lca_0001", "lca_0002", "lca_0003"],
+                ["LCA-0003", "lca_0001"],
+                1,
+            ),
+            ["lca_0003"],
+        )
+
     def test_json_only_run_removes_case_cache_and_embeds_timing_matrix(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -123,6 +134,28 @@ class SplitLoadingTests(unittest.TestCase):
             self.assertGreater(
                 results["summary"]["timing"]["average_case_seconds"],
                 0.0,
+            )
+
+            arrays_output = root / "output_with_arrays"
+            arrays_argv = [
+                *argv[: argv.index("--output-dir") + 1],
+                str(arrays_output),
+                *argv[argv.index("--output-dir") + 2 :],
+                "--save-evaluation-arrays",
+            ]
+            with mock.patch(
+                "evaluate_stage2_npz.run_reconstruction",
+                side_effect=fake_reconstruction,
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(arrays_argv), 0)
+            self.assertEqual(
+                sorted(
+                    path.relative_to(arrays_output).as_posix()
+                    for path in arrays_output.rglob("*")
+                    if path.is_file()
+                ),
+                ["evaluation_results.json", "voxel_masks/rca_0001.npz"],
             )
 
     def test_split_evaluation_requires_positive_early_stopping_patience(self):
@@ -260,6 +293,23 @@ class SplitLoadingTests(unittest.TestCase):
             path = Path(directory) / "split.json"
             path.write_text(json.dumps({"test_case_numbers": [3, 8]}), encoding="utf-8")
             self.assertEqual(load_split_case_references(path, "test"), ["3", "8"])
+
+    def test_parametric_feature_paths_are_mapped_to_projection_case_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "split.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "val": ["/features/lca/1/prefix_02.npz"],
+                        "test": [{"path": "/features/rca_0508.npz"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                load_split_case_references(path, "val_test"),
+                ["lca_0001", "rca_0508"],
+            )
 
 
 class MetricTests(unittest.TestCase):

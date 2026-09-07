@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -36,6 +37,35 @@ from stage2_npz_data import DEFAULT_SOURCE_ORIGIN_DISTANCE_M
 
 def _normalise_key(value: object) -> str:
     return "".join(character for character in str(value).lower() if character.isalnum())
+
+
+def _canonical_case_reference(value: object) -> str:
+    """Convert feature/archive paths in split files to projection case names."""
+
+    text = str(value).strip()
+    if not text:
+        return text
+    if isinstance(value, (int, np.integer)) or text.isdigit():
+        return str(value)
+
+    parts = [part for part in text.replace("\\", "/").split("/") if part]
+    stem = parts[-1].rsplit(".", 1)[0] if parts else text
+    direct = re.fullmatch(r"(?i)(lca|rca)[_-]?0*([0-9]+)", stem)
+    if direct is not None:
+        vessel, case_number = direct.groups()
+        return f"{vessel.lower()}_{int(case_number):04d}"
+
+    # LCA split entries point to files such as ``lca/1/prefix_02.npz``.
+    # Recover the physical case from the vessel directory and numeric child.
+    for index, part in enumerate(parts[:-1]):
+        vessel = part.lower()
+        if vessel not in {"lca", "rca"}:
+            continue
+        for child in parts[index + 1 : -1]:
+            if child.isdigit():
+                return f"{vessel}_{int(child):04d}"
+
+    return text
 
 
 def _find_split(document: object, requested: str) -> object:
@@ -75,10 +105,13 @@ def _find_split(document: object, requested: str) -> object:
 
 def _case_reference(record: object) -> str:
     if isinstance(record, (str, int, np.integer)):
-        return str(record)
+        return _canonical_case_reference(record)
     if not isinstance(record, Mapping):
         raise TypeError(f"Unsupported split record: {record!r}.")
     for candidate in (
+        "path",
+        "file",
+        "source_path",
         "case_name",
         "sample_name",
         "case_id",
@@ -86,12 +119,10 @@ def _case_reference(record: object) -> str:
         "case",
         "id",
         "name",
-        "path",
-        "file",
     ):
         for key, value in record.items():
             if _normalise_key(key) == _normalise_key(candidate):
-                return str(value)
+                return _canonical_case_reference(value)
     raise ValueError(f"Split record has no recognized case identifier: {record!r}.")
 
 
@@ -309,16 +340,54 @@ def _atomic_torch_save(payload: object, path: Path) -> None:
     os.replace(temporary, path)
 
 
+def _load_training_config(path: str | Path) -> Dict[str, Any]:
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(config_path)
+    with config_path.open("r", encoding="utf-8") as stream:
+        document = json.load(stream)
+    if not isinstance(document, Mapping):
+        raise TypeError("The GCP training config must contain a JSON object.")
+    unexpected_top_level = sorted(
+        set(document).difference({"schema_version", "description", "training"})
+    )
+    if unexpected_top_level:
+        raise ValueError(
+            "Unexpected top-level GCP config keys: "
+            f"{unexpected_top_level}. Put CLI defaults under 'training'."
+        )
+    if document.get("schema_version", 1) != 1:
+        raise ValueError("Only GCP training config schema_version 1 is supported.")
+    training = document.get("training")
+    if not isinstance(training, Mapping):
+        raise TypeError("The GCP training config requires a 'training' object.")
+    return {
+        str(key).strip().replace("-", "_"): value for key, value in training.items()
+    }
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", default=None)
+    config_args, _ = config_parser.parse_known_args(argv)
+    config_defaults = (
+        {} if config_args.config is None else _load_training_config(config_args.config)
+    )
+
     parser = argparse.ArgumentParser(
         description="Train the monocular Gaussian Centre Predictor."
     )
-    parser.add_argument("--projection-dir", required=True)
-    parser.add_argument("--ground-truth-dir", required=True)
-    parser.add_argument("--split-json", required=True)
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="JSON file containing defaults under a 'training' object.",
+    )
+    parser.add_argument("--projection-dir", default=None)
+    parser.add_argument("--ground-truth-dir", default=None)
+    parser.add_argument("--split-json", default=None)
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--validation-split", default="val")
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--volume-size", type=int, default=128)
@@ -328,6 +397,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=float,
         default=DEFAULT_SOURCE_ORIGIN_DISTANCE_M,
         help="Source-to-isocentre distance used to construct cone-beam rays.",
+    )
+    parser.add_argument(
+        "--expected-detector-pixel-spacing-mm",
+        type=float,
+        default=None,
+        help=(
+            "Optional data-integrity check. Geometry always uses the spacing stored "
+            "in each projection NPZ."
+        ),
     )
     parser.add_argument("--downsample-factor", type=int, default=2)
     parser.add_argument("--offset-scale", type=float, default=0.1)
@@ -351,9 +429,37 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--skeleton-iterations", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--amp", action="store_true")
+    amp_group = parser.add_mutually_exclusive_group()
+    amp_group.add_argument("--amp", dest="amp", action="store_true")
+    amp_group.add_argument("--no-amp", dest="amp", action="store_false")
+    parser.set_defaults(amp=False)
     parser.add_argument("--resume", default=None)
+    allowed_config_keys = {
+        action.dest
+        for action in parser._actions
+        if action.dest not in {"help", "config"}
+    }
+    unexpected_config_keys = sorted(
+        set(config_defaults).difference(allowed_config_keys)
+    )
+    if unexpected_config_keys:
+        parser.error(f"Unexpected GCP training settings: {unexpected_config_keys}.")
+    parser.set_defaults(**config_defaults)
     args = parser.parse_args(argv)
+    missing_paths = [
+        option
+        for option, value in (
+            ("--projection-dir", args.projection_dir),
+            ("--ground-truth-dir", args.ground_truth_dir),
+            ("--split-json", args.split_json),
+            ("--output-dir", args.output_dir),
+        )
+        if value is None
+    ]
+    if missing_paths:
+        parser.error(
+            f"Missing required settings: {missing_paths}. Supply them by CLI or --config."
+        )
     if args.image_size <= 0 or args.volume_size <= 1:
         parser.error("--image-size must be positive and --volume-size must exceed one.")
     if args.downsample_factor <= 0 or args.image_size % args.downsample_factor != 0:
@@ -364,6 +470,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("--max-points must be positive.")
     if args.source_origin_distance_m <= 0.0:
         parser.error("--source-origin-distance-m must be positive.")
+    if args.expected_detector_pixel_spacing_mm is not None and (
+        not math.isfinite(float(args.expected_detector_pixel_spacing_mm))
+        or float(args.expected_detector_pixel_spacing_mm) <= 0.0
+    ):
+        parser.error(
+            "--expected-detector-pixel-spacing-mm must be finite and positive."
+        )
     return args
 
 
@@ -390,10 +503,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError(f"Train/validation leakage: {overlap[:10]}.")
 
     train_pairs = discover_case_pairs(
-        args.projection_dir, args.ground_truth_dir, train_names
+        args.projection_dir,
+        args.ground_truth_dir,
+        train_names,
+        expected_detector_pixel_spacing_mm=args.expected_detector_pixel_spacing_mm,
     )
     validation_pairs = discover_case_pairs(
-        args.projection_dir, args.ground_truth_dir, validation_names
+        args.projection_dir,
+        args.ground_truth_dir,
+        validation_names,
+        expected_detector_pixel_spacing_mm=args.expected_detector_pixel_spacing_mm,
     )
     resolved_overlap = sorted(
         {pair.projection_path for pair in train_pairs}.intersection(
@@ -478,6 +597,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "projection_dir": str(Path(args.projection_dir).expanduser().resolve()),
         "ground_truth_dir": str(Path(args.ground_truth_dir).expanduser().resolve()),
         "split_json": str(split_path),
+        "config": (
+            None
+            if args.config is None
+            else str(Path(args.config).expanduser().resolve())
+        ),
         "output_dir": str(output_dir),
         "cache_dir": str(cache_dir),
         "model_config": model_config.to_dict(),
