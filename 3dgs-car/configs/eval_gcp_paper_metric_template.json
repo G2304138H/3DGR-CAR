@@ -45,6 +45,8 @@
     "log_every": 100,
     "early_stop_checks": 7,
     "projection_loss_alpha": 0.5,
+    "fallback_detector_pixel_spacing_mm": null,
+    "fallback_sid_m": null,
     "densify": true,
     "gpu_index": 0
   }

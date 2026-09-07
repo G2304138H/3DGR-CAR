@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from gaussian_model_anisotropic import GaussianModelAnisotropic
 from train_stage2_npz import (
     build_centerline_skeleton_masks,
+    parse_args,
     projection_reconstruction_loss,
     resolve_projection_loss_alpha,
     select_gcp_initialization_view,
@@ -13,6 +14,22 @@ from train_stage2_npz import (
 
 
 class Stage2GCPHelperTests(unittest.TestCase):
+    def test_projection_calibration_fallback_arguments_are_parsed(self):
+        args, _ = parse_args(
+            [
+                "--input",
+                "case.npz",
+                "--output-dir",
+                "output",
+                "--fallback-detector-pixel-spacing-mm",
+                "0.55",
+                "--fallback-sid-m",
+                "0.9",
+            ]
+        )
+        self.assertEqual(args.fallback_detector_pixel_spacing_mm, 0.55)
+        self.assertEqual(args.fallback_sid_m, 0.9)
+
     def test_monocular_initializer_selects_exactly_first_requested_view(self):
         self.assertEqual(select_gcp_initialization_view([3, 5]), 3)
         self.assertEqual(select_gcp_initialization_view([6, 0, 4]), 6)

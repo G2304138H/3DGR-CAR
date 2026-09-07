@@ -48,6 +48,8 @@ _TRAINER_SCALAR_FLAGS = {
     "volume_size": "--volume-size",
     "volume_extent_m": "--volume-extent-m",
     "source_origin_distance_m": "--source-origin-distance-m",
+    "fallback_detector_pixel_spacing_mm": "--fallback-detector-pixel-spacing-mm",
+    "fallback_sid_m": "--fallback-sid-m",
     "num_init_gaussians": "--num-init-gaussians",
     "air_threshold": "--air-threshold",
     "initial_density": "--initial-density",
@@ -418,7 +420,12 @@ def resolve_evaluation_config(
         config.get("gaussian_optimization"),
         label="gaussian_optimization",
     )
-    for inherited_key in ("source_origin_distance_m", "volume_size"):
+    for inherited_key in (
+        "source_origin_distance_m",
+        "volume_size",
+        "fallback_detector_pixel_spacing_mm",
+        "fallback_sid_m",
+    ):
         if (
             inherited_key not in optimization
             and training_config.get(inherited_key) is not None

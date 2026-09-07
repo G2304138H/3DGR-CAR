@@ -16,6 +16,33 @@ from evaluate_stage2_npz import METRIC_NAMES, parse_args as parse_stage2_args
 
 
 class GcpEvaluationConfigTests(unittest.TestCase):
+    def test_concrete_lca_and_rca_configs_select_best_val_test_checkpoints(self):
+        config_dir = Path(__file__).resolve().parent / "configs"
+        expected = {
+            "lca": {"spacing": 0.65, "sid": None},
+            "rca": {"spacing": 0.55, "sid": 0.9},
+        }
+        for artery, calibration in expected.items():
+            path = (
+                config_dir
+                / f"eval_gcp_paper_metric_{artery}_val_test.json"
+            )
+            config = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(config["evaluation_mode"], "paper_metric")
+            self.assertEqual(config["eval_split"], "val_test")
+            self.assertEqual(config["checkpoint_choice"], "best")
+            self.assertTrue(config["checkpoint_path"].endswith("/best_gcp.pt"))
+            self.assertEqual(config["eval_num_views"], [1, 2])
+            self.assertTrue(config["continue_on_error"])
+            optimization = config["gaussian_optimization"]
+            self.assertEqual(
+                optimization["fallback_detector_pixel_spacing_mm"],
+                calibration["spacing"],
+            )
+            self.assertEqual(
+                optimization.get("fallback_sid_m"), calibration["sid"]
+            )
+
     def _fixture(self, root: Path, mode: str = "paper_metric") -> Path:
         experiment = root / "experiment"
         projections = root / "projections"
@@ -36,6 +63,8 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                     "projection_dir": str(projections),
                     "ground_truth_dir": str(ground_truth),
                     "split_json": str(split),
+                    "fallback_detector_pixel_spacing_mm": 0.65,
+                    "fallback_sid_m": 0.9,
                 }
             ),
             encoding="utf-8",
@@ -121,6 +150,15 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             self.assertIn("--save-evaluation-arrays", arguments)
             self.assertIn("--no-densify", arguments)
             self.assertEqual(arguments[arguments.index("--iterations") + 1], "12")
+            self.assertEqual(
+                arguments[
+                    arguments.index("--fallback-detector-pixel-spacing-mm") + 1
+                ],
+                "0.65",
+            )
+            self.assertEqual(
+                arguments[arguments.index("--fallback-sid-m") + 1], "0.9"
+            )
             stage2_args, trainer_args = parse_stage2_args(arguments)
             self.assertEqual(stage2_args.view_indices, [3, 5])
             self.assertIn("--gcp-checkpoint", trainer_args)

@@ -734,6 +734,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         default=DEFAULT_SOURCE_ORIGIN_DISTANCE_M,
         help="The Stage-2 renderer hard-codes this to 0.75 m.",
     )
+    parser.add_argument(
+        "--fallback-detector-pixel-spacing-mm",
+        type=float,
+        default=None,
+        help=(
+            "Detector pixel spacing in mm used only when the projection NPZ "
+            "has no imager_pixel_spacing key."
+        ),
+    )
+    parser.add_argument(
+        "--fallback-sid-m",
+        type=float,
+        default=None,
+        help="SID in metres used only when the projection NPZ has no sid key.",
+    )
     parser.add_argument("--num-init-gaussians", type=int, default=10000)
     parser.add_argument("--air-threshold", type=float, default=0.05)
     parser.add_argument("--initial-density", type=float, default=0.04)
@@ -834,6 +849,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         parser.error("--projection-loss-alpha must be in [0, 1].")
     if not 0.0 <= float(args.centerline_threshold) <= 1.0:
         parser.error("--centerline-threshold must be in [0, 1].")
+    for option, value in (
+        (
+            "--fallback-detector-pixel-spacing-mm",
+            args.fallback_detector_pixel_spacing_mm,
+        ),
+        ("--fallback-sid-m", args.fallback_sid_m),
+    ):
+        if value is not None and (
+            not math.isfinite(float(value)) or float(value) <= 0.0
+        ):
+            parser.error(f"{option} must be finite and positive.")
     if args.prediction_threshold is None and args.prediction_threshold_percentile is None:
         args.prediction_threshold_percentile = float(
             DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
@@ -856,7 +882,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     case = load_stage2_projection_case(
-        args.input, source_origin_distance_m=float(args.source_origin_distance_m)
+        args.input,
+        source_origin_distance_m=float(args.source_origin_distance_m),
+        fallback_detector_pixel_spacing_mm=(
+            args.fallback_detector_pixel_spacing_mm
+        ),
+        fallback_sid_m=args.fallback_sid_m,
     )
     view_indices = validate_view_indices(args.view_indices, case.num_views)
     target = torch.from_numpy(case.images[view_indices]).to(device=device).unsqueeze(0)
@@ -1270,6 +1301,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "volume_size": int(args.volume_size),
         "volume_extent_m": float(volume_extent_m),
         "source_origin_distance_m": float(case.source_origin_distance_m),
+        "fallback_detector_pixel_spacing_mm": (
+            None
+            if args.fallback_detector_pixel_spacing_mm is None
+            else float(args.fallback_detector_pixel_spacing_mm)
+        ),
+        "fallback_sid_m": (
+            None if args.fallback_sid_m is None else float(args.fallback_sid_m)
+        ),
         "detector_origin_distance_m": float(case.detector_origin_distance_m),
         "detector_pixel_spacing_m": float(case.detector_pixel_spacing_m),
         "best_checked_iteration": int(best_iteration + 1),

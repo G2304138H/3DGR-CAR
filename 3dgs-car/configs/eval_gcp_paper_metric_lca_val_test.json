@@ -1,12 +1,13 @@
 {
-  "experiment_dir": null,
-  "split_json_path": null,
+  "description": "LCA paper-metric evaluation on validation plus test cases using the best trained GCP checkpoint.",
+  "experiment_dir": "/export/home2/reny0012/result/3dgr_car_gcp/lca",
+  "split_json_path": "/export/home2/reny0012/result/vessel_trees/multi_branch_experiments/vggt_branch_prefix_lca_grouped_visibility_1to7_clinical_views_refiner_5mm/split.json",
   "checkpoint_choice": "best",
-  "checkpoint_path": null,
-  "evaluation_dataset_dir": null,
-  "eval_output_dir": null,
+  "checkpoint_path": "/export/home2/reny0012/result/3dgr_car_gcp/lca/best_gcp.pt",
+  "evaluation_dataset_dir": "/dataset/reny0012/vessel_code_stage_2_lca_paired/anchors",
+  "eval_output_dir": "/export/home2/reny0012/result/3dgr_car_gcp/lca/evaluation_paper_metric/best_gcp",
 
-  "evaluation_mode": "visualisation",
+  "evaluation_mode": "paper_metric",
   "eval_split": "val_test",
   "num_eval_cases": "all",
   "eval_case_ids": null,
@@ -14,9 +15,9 @@
   "eval_view_indices": [0, 1],
   "eval_view_selection": "fixed",
   "eval_view_selection_seed": 42,
-  "max_visualizations": "all",
+  "max_visualizations": 0,
 
-  "paper_metric_ground_truth_dir": null,
+  "paper_metric_ground_truth_dir": "/dataset/reny0012/imagecas_voxel",
   "paper_metric_save_masks": true,
   "paper_metric_save_ssim_map": false,
   "paper_metric_ssim_window_size": 7,
@@ -38,17 +39,15 @@
   "offset_interpolation": "linear",
 
   "reuse_existing": false,
-  "continue_on_error": false,
+  "continue_on_error": true,
+  "keep_case_cache": false,
   "gaussian_optimization": {
     "iterations": 8000,
     "log_every": 100,
     "early_stop_checks": 7,
     "projection_loss_alpha": 0.5,
-    "fallback_detector_pixel_spacing_mm": null,
-    "fallback_sid_m": null,
+    "fallback_detector_pixel_spacing_mm": 0.65,
     "densify": true,
-    "monitor_gif_frames": 24,
-    "monitor_gif_fps": 5,
     "gpu_index": 0
   }
 }

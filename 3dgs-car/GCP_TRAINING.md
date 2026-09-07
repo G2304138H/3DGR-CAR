@@ -271,6 +271,44 @@ prefix: with `[3, 5]`, the one-view run uses `[3]` and the two-view run uses
 `[3, 5]`. Only the first selected view enters the monocular GCP; all selected
 views constrain the subsequent Gaussian optimization.
 
+### Run the LCA and RCA paper-metric evaluations together
+
+The repository includes concrete validation-plus-test configurations for the
+two separately trained predictors:
+
+- `configs/eval_gcp_paper_metric_lca_val_test.json` selects
+  `/export/home2/reny0012/result/3dgr_car_gcp/lca/best_gcp.pt`.
+- `configs/eval_gcp_paper_metric_rca_val_test.json` selects
+  `/export/home2/reny0012/result/3dgr_car_gcp/rca/best_gcp.pt`.
+
+Both configurations evaluate the one- and two-view prefixes over every case
+in `val_test`. They also carry the vessel-specific detector calibration
+fallbacks used during GCP training: `0.65` mm for LCA and `0.55` mm plus a
+`0.9` m SID for RCA. Stored NPZ calibration continues to take precedence.
+Failed cases are recorded while the remaining cases and view counts continue;
+the launcher still exits nonzero if either artery has any failure.
+
+Run both sequentially on GPU 0 with:
+
+```bash
+./scripts/run_gcp_paper_metrics_val_test.sh
+```
+
+Resolve and inspect both jobs without starting optimization with:
+
+```bash
+./scripts/run_gcp_paper_metrics_val_test.sh --dry-run
+```
+
+The launcher defaults to
+`/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python`. To use another
+Stage-2 CUDA environment:
+
+```bash
+GCP_EVAL_PYTHON=/path/to/environment/bin/python \
+  ./scripts/run_gcp_paper_metrics_val_test.sh
+```
+
 ## Explicit reproduction choices
 
 The paper does not specify the exact U-Net width, downsampling factor, offset

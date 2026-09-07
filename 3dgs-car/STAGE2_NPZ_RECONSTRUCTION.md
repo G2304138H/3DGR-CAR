@@ -73,9 +73,11 @@ python train_stage2_npz.py \
 
 The source-to-isocentre distance is set to `0.75 m`, matching the hard-coded
 value in the supplied Stage-2 renderer. `sid` and detector pixel spacing are
-read from the NPZ. The reconstruction field of view defaults to the physical
-detector width projected back to isocentre; override it with
-`--volume-extent-m` when using a different crop.
+read from the NPZ when available. Older archives can use `--fallback-sid-m`
+and `--fallback-detector-pixel-spacing-mm`; stored calibration always takes
+precedence. The reconstruction field of view defaults to the physical detector
+width projected back to isocentre; override it with `--volume-extent-m` when
+using a different crop.
 
 ## Outputs
 
