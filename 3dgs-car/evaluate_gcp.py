@@ -960,12 +960,51 @@ def _write_combined_outputs(
     metrics_dir.mkdir(parents=True, exist_ok=True)
     completed = [record for record in records if record.get("status") == "completed"]
     unique_cases = sorted({str(record.get("case_name")) for record in records})
+    timing_by_view_count: Dict[str, Any] = {}
+    total_requested_case_evaluations = 0
+    for view_label, summary in summaries.items():
+        view_records = [
+            record
+            for record in records
+            if record.get("view_label") == view_label
+        ]
+        requested_raw = summary.get("num_cases_requested")
+        requested = (
+            len(view_records)
+            if requested_raw is None
+            else int(requested_raw)
+        )
+        total_requested_case_evaluations += requested
+        timing_by_view_count[view_label] = stage2_evaluation.summarise_timings(
+            view_records,
+            requested,
+        )
+    overall_timing = stage2_evaluation.summarise_timings(
+        records,
+        total_requested_case_evaluations,
+    )
+    timing_summary = {
+        "scope": "one case at one evaluated view count",
+        "average_case_seconds": overall_timing["average_case_seconds"],
+        "average_case_seconds_standard_error": overall_timing[
+            "average_case_seconds_standard_error"
+        ],
+        "average_pipeline_seconds_per_case": overall_timing[
+            "reconstruction_wall_time_seconds"
+        ]["mean"],
+        "average_optimization_seconds_per_case": overall_timing[
+            "optimization_elapsed_seconds"
+        ]["mean"],
+        "overall": overall_timing,
+        "by_view_count": timing_by_view_count,
+    }
     evaluation_summary = {
         "num_cases": len(unique_cases),
         "num_case_view_evaluations": len(records),
         "num_completed": len(completed),
         "num_failed": len(records) - len(completed),
         "metrics_by_view_count": summaries,
+        "timing": timing_summary,
     }
     performance_summary = {
         "schema_version": 1,
@@ -1065,6 +1104,7 @@ def _write_combined_outputs(
                     "projection_offset_mode", "auto"
                 ),
             },
+            "timing": timing_summary,
             "by_view_count": summaries,
         }
         stage2_evaluation.write_json(
@@ -1084,6 +1124,20 @@ def _write_combined_outputs(
                 "num_files": len(mask_files),
                 "files": mask_files,
             },
+        )
+
+    view_timing_text = []
+    for view_label, timing in timing_by_view_count.items():
+        average = float(timing["average_case_seconds"])
+        if np.isfinite(average):
+            view_timing_text.append(f"{view_label}={average:.3f}s")
+    overall_average = float(timing_summary["average_case_seconds"])
+    if np.isfinite(overall_average):
+        view_timing_text.append(f"overall={overall_average:.3f}s")
+    if view_timing_text:
+        print(
+            "Average processing time per case: " + ", ".join(view_timing_text),
+            flush=True,
         )
 
 

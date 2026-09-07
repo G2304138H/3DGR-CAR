@@ -301,6 +301,16 @@ python -m evaluate_gcp --config configs/eval_gcp_paper_metric_rca_val_test.json
 Add `--dry-run` to either command to resolve the paths and write the evaluation
 plan without running any Gaussian optimization.
 
+Paper-metric evaluation always records timing for every case and view count.
+The per-case JSON/CSV records contain total case wall time, reconstruction
+subprocess time, CUDA-synchronized Gaussian optimization time, and metric time.
+Both `performance_summary.json` and
+`metrics/paper_metric_summary.json` expose these under `timing`, including
+`average_case_seconds`, `average_pipeline_seconds_per_case`,
+`average_optimization_seconds_per_case`, standard errors, and `by_view_count`
+summaries. The console also prints the final mean processing time per case for
+each view count and across all case/view runs.
+
 ### Visualize one selected LCA or RCA case
 
 `visualize_gcp_case.py` provides the single-case equivalent of the parametric

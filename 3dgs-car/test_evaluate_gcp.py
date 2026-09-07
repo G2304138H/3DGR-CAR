@@ -284,6 +284,10 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                     "case_name": "lca_0001",
                     "split": "val_test",
                     "status": "completed",
+                    "case_wall_time_seconds": float(count * 10),
+                    "reconstruction_wall_time_seconds": float(count * 8),
+                    "optimization_elapsed_seconds": float(count * 6),
+                    "metrics_wall_time_seconds": float(count * 2),
                     **{name: float(count) for name in METRIC_NAMES},
                 }
                 summary = {
@@ -326,12 +330,31 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                 sorted(performance["evaluation"]["metrics_by_view_count"]),
                 ["k1", "k2"],
             )
+            timing = performance["evaluation"]["timing"]
+            self.assertEqual(timing["average_case_seconds"], 15.0)
+            self.assertEqual(
+                timing["average_pipeline_seconds_per_case"], 12.0
+            )
+            self.assertEqual(
+                timing["average_optimization_seconds_per_case"], 9.0
+            )
+            self.assertEqual(
+                timing["by_view_count"]["k1"]["average_case_seconds"],
+                10.0,
+            )
+            self.assertEqual(
+                timing["by_view_count"]["k2"]["average_case_seconds"],
+                20.0,
+            )
             self.assertTrue(
                 (output / "metrics" / "paper_metric_per_case.json").is_file()
             )
-            self.assertTrue(
-                (output / "metrics" / "paper_metric_summary.json").is_file()
+            paper_summary = json.loads(
+                (output / "metrics" / "paper_metric_summary.json").read_text(
+                    encoding="utf-8"
+                )
             )
+            self.assertEqual(paper_summary["timing"], timing)
             self.assertTrue((output / "metrics" / "metrics_matrix.npz").is_file())
 
 
