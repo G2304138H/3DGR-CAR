@@ -17,7 +17,7 @@ import math
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -397,11 +397,16 @@ def predict_gcp_initial_centers(
     view_indices: Sequence[int],
     volume_extent_m: float,
     device: torch.device,
+    expected_model_config: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """Run the monocular GCP on exactly the first selected Stage-2 view."""
     # These imports are intentionally lazy: legacy FDK/BP runs should not load
     # the learned initializer or its target-generation helpers.
-    from gcp_model import lift_depth_offsets_to_centers, load_gcp_checkpoint
+    from gcp_model import (
+        GCPModelConfig,
+        lift_depth_offsets_to_centers,
+        load_gcp_checkpoint,
+    )
     from gcp_targets import (
         detector_ray_box_intersections,
         scale_cone_vector_for_detector,
@@ -410,6 +415,24 @@ def predict_gcp_initial_centers(
     initialization_view_index = select_gcp_initialization_view(view_indices)
     checkpoint = Path(checkpoint_path).expanduser().resolve()
     model = load_gcp_checkpoint(checkpoint, device=device)
+    loaded_model_config = model.config.to_dict()
+    if expected_model_config is not None:
+        configured_model_config = GCPModelConfig.from_dict(
+            expected_model_config
+        ).to_dict()
+        if configured_model_config != loaded_model_config:
+            mismatches = {
+                key: {
+                    "configured": configured_model_config[key],
+                    "checkpoint": loaded_model_config[key],
+                }
+                for key in configured_model_config
+                if configured_model_config[key] != loaded_model_config[key]
+            }
+            raise ValueError(
+                "Configured GCP model parameters do not match the checkpoint: "
+                f"{mismatches}."
+            )
     input_size = int(model.config.image_size)
     if int(model.config.in_channels) != 1:
         raise ValueError(
@@ -476,7 +499,12 @@ def predict_gcp_initial_centers(
         "valid_output_rays": int(valid.sum().item()),
         "total_output_rays": int(valid.numel()),
         "center_coordinate_order": "normalized_zyx",
-        "model_config": model.config.to_dict(),
+        "model_config": loaded_model_config,
+        "configured_model_parameters": (
+            None
+            if expected_model_config is None
+            else dict(expected_model_config)
+        ),
     }
     return centers, metadata
 
@@ -763,6 +791,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
             "used by the predictor."
         ),
     )
+    parser.add_argument(
+        "--expected-gcp-model-config-json",
+        default=None,
+        help=(
+            "Optional JSON object describing the expected GCP architecture. "
+            "Evaluation fails if it differs from the loaded checkpoint."
+        ),
+    )
     parser.add_argument("--target-type", choices=["auto", "mask", "line-integral"], default="auto")
     parser.add_argument("--silhouette-gain", type=float, default=None)
     parser.add_argument("--silhouette-target-level", type=float, default=0.95)
@@ -841,6 +877,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     )
     parser.add_argument("--gpu-index", type=int, default=0)
     args = parser.parse_args(argv)
+    if args.expected_gcp_model_config_json is not None:
+        try:
+            expected_model_config = json.loads(
+                args.expected_gcp_model_config_json
+            )
+        except json.JSONDecodeError as error:
+            parser.error(
+                "--expected-gcp-model-config-json must contain valid JSON: "
+                f"{error}."
+            )
+        if not isinstance(expected_model_config, Mapping):
+            parser.error(
+                "--expected-gcp-model-config-json must contain a JSON object."
+            )
+        args.expected_gcp_model_config = dict(expected_model_config)
+    else:
+        args.expected_gcp_model_config = None
     if args.init_method == "gcp" and args.gcp_checkpoint is None:
         parser.error("--gcp-checkpoint is required when --init-method gcp.")
     if args.projection_loss_alpha is not None and not (
@@ -950,6 +1003,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             view_indices=view_indices,
             volume_extent_m=volume_extent_m,
             device=device,
+            expected_model_config=args.expected_gcp_model_config,
         )
         if not args.evaluation_cache_only:
             np.save(

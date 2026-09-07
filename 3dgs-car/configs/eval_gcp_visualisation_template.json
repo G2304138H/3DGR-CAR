@@ -1,8 +1,27 @@
 {
-  "experiment_dir": null,
+  "model": {
+    "name": "MonocularGaussianCenterPredictor",
+    "experiment_dir": null,
+    "pretrained_weights": null,
+    "checkpoint_choice": "best",
+    "parameters": {
+      "image_size": 128,
+      "in_channels": 1,
+      "base_channels": 32,
+      "num_levels": 4,
+      "alpha": 2,
+      "offset_scale": 0.1,
+      "norm_groups": 8,
+      "dropout": 0.0
+    },
+    "parameterization": {
+      "depth_activation": "sigmoid",
+      "offset_activation": "bounded_tanh",
+      "coordinate_order": "normalized_zyx",
+      "initialization_view": "first_selected_view"
+    }
+  },
   "split_json_path": null,
-  "checkpoint_choice": "best",
-  "checkpoint_path": null,
   "evaluation_dataset_dir": null,
   "eval_output_dir": null,
 

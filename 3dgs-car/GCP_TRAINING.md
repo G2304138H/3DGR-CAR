@@ -224,11 +224,12 @@ python evaluate_stage2_npz.py \
 ## Config-driven validation and test evaluation
 
 `evaluate_gcp.py` is the high-level evaluation entry point. It follows the
-parametric evaluator's JSON conventions: an experiment directory plus
-`checkpoint_choice`, `evaluation_mode`, `eval_split`, `eval_num_views`, and an
-evaluation output directory. When `training_config.json` is present in the GCP
-experiment, the projection directory, ground-truth directory, and split JSON
-are inherited automatically; any non-null evaluation value overrides them.
+parametric evaluator's JSON conventions. The nested `model` object holds the
+experiment directory, pretrained weights, checkpoint choice, and predictor
+architecture; the remaining fields select the mode, split, view counts, data,
+optimization, metrics, and output directory. When `training_config.json` is
+present in the GCP experiment, missing data and calibration paths can still be
+inherited automatically; any non-null evaluation value overrides them.
 
 Start from one of these templates:
 
@@ -237,9 +238,8 @@ Start from one of these templates:
 
 Then run:
 
-```bash
-python evaluate_gcp.py \
-  --config configs/eval_gcp_paper_metric_template.json
+```console
+python -m evaluate_gcp --config configs/eval_gcp_paper_metric_template.json
 ```
 
 Use `--dry-run` first to resolve all paths, checkpoint choices, view prefixes,
@@ -271,43 +271,35 @@ prefix: with `[3, 5]`, the one-view run uses `[3]` and the two-view run uses
 `[3, 5]`. Only the first selected view enters the monocular GCP; all selected
 views constrain the subsequent Gaussian optimization.
 
-### Run the LCA and RCA paper-metric evaluations together
+### Run the LCA and RCA validation-plus-test evaluations with Python
 
-The repository includes concrete validation-plus-test configurations for the
-two separately trained predictors:
+The repository includes one self-contained paper-metric configuration for each
+separately trained predictor:
 
-- `configs/eval_gcp_paper_metric_lca_val_test.json` selects
-  `/export/home2/reny0012/result/3dgr_car_gcp/lca/best_gcp.pt`.
-- `configs/eval_gcp_paper_metric_rca_val_test.json` selects
-  `/export/home2/reny0012/result/3dgr_car_gcp/rca/best_gcp.pt`.
+- `configs/eval_gcp_paper_metric_lca_val_test.json`
+- `configs/eval_gcp_paper_metric_rca_val_test.json`
 
-Both configurations evaluate the one- and two-view prefixes over every case
-in `val_test`. They also carry the vessel-specific detector calibration
-fallbacks used during GCP training: `0.65` mm for LCA and `0.55` mm plus a
-`0.9` m SID for RCA. Stored NPZ calibration continues to take precedence.
-Failed cases are recorded while the remaining cases and view counts continue;
-the launcher still exits nonzero if either artery has any failure.
+Each file selects `best_gcp.pt`, evaluates every validation case followed by
+every test case through the combined `val_test` split, and stores the predictor
+architecture, paths, detector calibration, Gaussian optimizer parameters, and
+paper-metric settings. The architecture in the file is checked against the
+architecture saved in the checkpoint before inference. Stored NPZ calibration
+takes precedence over the configured fallback values.
 
-Run both sequentially on GPU 0 with:
+From the `3dgs-car` directory, run LCA with:
 
-```bash
-./scripts/run_gcp_paper_metrics_val_test.sh
+```console
+python -m evaluate_gcp --config configs/eval_gcp_paper_metric_lca_val_test.json
 ```
 
-Resolve and inspect both jobs without starting optimization with:
+Run RCA with:
 
-```bash
-./scripts/run_gcp_paper_metrics_val_test.sh --dry-run
+```console
+python -m evaluate_gcp --config configs/eval_gcp_paper_metric_rca_val_test.json
 ```
 
-The launcher defaults to
-`/export/home2/reny0012/vir_env/3dgr_car_gcp/bin/python`. To use another
-Stage-2 CUDA environment:
-
-```bash
-GCP_EVAL_PYTHON=/path/to/environment/bin/python \
-  ./scripts/run_gcp_paper_metrics_val_test.sh
-```
+Add `--dry-run` to either command to resolve the paths and write the evaluation
+plan without running any Gaussian optimization.
 
 ## Explicit reproduction choices
 

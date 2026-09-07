@@ -77,6 +77,7 @@ _FORBIDDEN_EXTRA_TRAINER_OPTIONS = {
     "--view-indices",
     "--init-method",
     "--gcp-checkpoint",
+    "--expected-gcp-model-config-json",
     "--early-stop-checks",
     "--record-optimization-time",
     "--evaluation-cache-only",
@@ -247,7 +248,10 @@ def _resolve_experiment_and_checkpoint(
     config_path: Path,
     checkpoint_override: Optional[str],
 ) -> Tuple[Path, Path, str]:
+    model = _optional_mapping(config.get("model"), label="model")
     experiment_raw = config.get("experiment_dir")
+    if experiment_raw is None:
+        experiment_raw = model.get("experiment_dir")
     experiment_dir = (
         _resolve_path(
             experiment_raw,
@@ -257,12 +261,16 @@ def _resolve_experiment_and_checkpoint(
         if experiment_raw is not None
         else None
     )
-    checkpoint_raw = checkpoint_override or config.get(
-        "checkpoint_path", config.get("checkpoint")
+    checkpoint_raw = (
+        checkpoint_override
+        or model.get("pretrained_weights")
+        or model.get("checkpoint_path")
+        or config.get("checkpoint_path", config.get("checkpoint"))
     )
-    choice = _normalise_checkpoint_choice(
-        config.get("checkpoint_choice", "best")
-    )
+    choice_raw = config.get("checkpoint_choice")
+    if choice_raw is None:
+        choice_raw = model.get("checkpoint_choice", "best")
+    choice = _normalise_checkpoint_choice(choice_raw)
     if checkpoint_raw is None:
         if experiment_dir is None:
             raise ValueError(
@@ -350,6 +358,51 @@ def resolve_evaluation_config(
 
     config_path = config_path.expanduser().resolve()
     config = _load_json_object(config_path, label="Evaluation configuration")
+    model_options = _optional_mapping(config.get("model"), label="model")
+    model_parameters = _optional_mapping(
+        model_options.get("parameters", config.get("gcp_model_parameters")),
+        label="model.parameters",
+    )
+    allowed_model_parameters = {
+        "image_size",
+        "in_channels",
+        "base_channels",
+        "num_levels",
+        "alpha",
+        "offset_scale",
+        "norm_groups",
+        "dropout",
+    }
+    unknown_model_parameters = sorted(
+        set(model_parameters) - allowed_model_parameters
+    )
+    if unknown_model_parameters:
+        raise ValueError(
+            "Unknown GCP model parameters: "
+            f"{unknown_model_parameters}."
+        )
+    fixed_parameterization = {
+        "depth_activation": "sigmoid",
+        "offset_activation": "bounded_tanh",
+        "coordinate_order": "normalized_zyx",
+        "initialization_view": "first_selected_view",
+    }
+    parameterization = _optional_mapping(
+        model_options.get("parameterization"),
+        label="model.parameterization",
+    )
+    unsupported_parameterization = {
+        key: value
+        for key, value in parameterization.items()
+        if key not in fixed_parameterization
+        or fixed_parameterization[key] != value
+    }
+    if unsupported_parameterization:
+        raise ValueError(
+            "The current GCP implementation has a fixed output "
+            "parameterization; unsupported configured values: "
+            f"{unsupported_parameterization}."
+        )
     mode = _normalise_evaluation_mode(config.get("evaluation_mode"))
     experiment_dir, checkpoint_path, checkpoint_choice = (
         _resolve_experiment_and_checkpoint(
@@ -559,6 +612,16 @@ def resolve_evaluation_config(
         "experiment_dir": str(experiment_dir),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_choice": checkpoint_choice,
+        "model": {
+            **model_options,
+            "name": model_options.get(
+                "name", "MonocularGaussianCenterPredictor"
+            ),
+            "experiment_dir": str(experiment_dir),
+            "pretrained_weights": str(checkpoint_path),
+            "checkpoint_choice": checkpoint_choice,
+            "parameters": model_parameters,
+        },
         "training_config_path": (
             str(training_config_path) if training_config_path.is_file() else None
         ),
@@ -645,6 +708,18 @@ def _trainer_arguments(resolved: Mapping[str, Any]) -> List[str]:
             str(resolved["checkpoint_path"]),
         )
     )
+    model_parameters = resolved.get("model", {}).get("parameters", {})
+    if model_parameters:
+        arguments.extend(
+            (
+                "--expected-gcp-model-config-json",
+                json.dumps(
+                    model_parameters,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
     return arguments
 
 

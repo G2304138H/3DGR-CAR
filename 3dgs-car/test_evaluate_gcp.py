@@ -16,7 +16,7 @@ from evaluate_stage2_npz import METRIC_NAMES, parse_args as parse_stage2_args
 
 
 class GcpEvaluationConfigTests(unittest.TestCase):
-    def test_concrete_lca_and_rca_configs_select_best_val_test_checkpoints(self):
+    def test_concrete_lca_and_rca_configs_are_self_contained_val_test_jobs(self):
         config_dir = Path(__file__).resolve().parent / "configs"
         expected = {
             "lca": {"spacing": 0.65, "sid": None},
@@ -30,8 +30,22 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             config = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(config["evaluation_mode"], "paper_metric")
             self.assertEqual(config["eval_split"], "val_test")
-            self.assertEqual(config["checkpoint_choice"], "best")
-            self.assertTrue(config["checkpoint_path"].endswith("/best_gcp.pt"))
+            model = config["model"]
+            self.assertEqual(model["checkpoint_choice"], "best")
+            self.assertTrue(model["pretrained_weights"].endswith("/best_gcp.pt"))
+            self.assertEqual(
+                model["parameters"],
+                {
+                    "image_size": 128,
+                    "in_channels": 1,
+                    "base_channels": 32,
+                    "num_levels": 4,
+                    "alpha": 2,
+                    "offset_scale": 0.1,
+                    "norm_groups": 8,
+                    "dropout": 0.0,
+                },
+            )
             self.assertEqual(config["eval_num_views"], [1, 2])
             self.assertTrue(config["continue_on_error"])
             optimization = config["gaussian_optimization"]
@@ -73,8 +87,27 @@ class GcpEvaluationConfigTests(unittest.TestCase):
         config.write_text(
             json.dumps(
                 {
-                    "experiment_dir": str(experiment),
-                    "checkpoint_choice": "best",
+                    "model": {
+                        "experiment_dir": str(experiment),
+                        "pretrained_weights": str(experiment / "best_gcp.pt"),
+                        "checkpoint_choice": "best",
+                        "parameters": {
+                            "image_size": 128,
+                            "in_channels": 1,
+                            "base_channels": 32,
+                            "num_levels": 4,
+                            "alpha": 2,
+                            "offset_scale": 0.1,
+                            "norm_groups": 8,
+                            "dropout": 0.0,
+                        },
+                        "parameterization": {
+                            "depth_activation": "sigmoid",
+                            "offset_activation": "bounded_tanh",
+                            "coordinate_order": "normalized_zyx",
+                            "initialization_view": "first_selected_view",
+                        },
+                    },
                     "eval_output_dir": str(output),
                     "evaluation_mode": mode,
                     "eval_split": "val_test",
@@ -146,6 +179,13 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             checkpoint_position = arguments.index("--gcp-checkpoint")
             self.assertEqual(
                 arguments[checkpoint_position + 1], resolved["checkpoint_path"]
+            )
+            expected_position = arguments.index(
+                "--expected-gcp-model-config-json"
+            )
+            self.assertEqual(
+                json.loads(arguments[expected_position + 1]),
+                resolved["model"]["parameters"],
             )
             self.assertIn("--save-evaluation-arrays", arguments)
             self.assertIn("--no-densify", arguments)

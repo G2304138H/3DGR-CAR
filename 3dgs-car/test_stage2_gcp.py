@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import torch
@@ -29,6 +30,33 @@ class Stage2GCPHelperTests(unittest.TestCase):
         )
         self.assertEqual(args.fallback_detector_pixel_spacing_mm, 0.55)
         self.assertEqual(args.fallback_sid_m, 0.9)
+
+    def test_expected_gcp_model_parameters_are_parsed(self):
+        expected = {
+            "image_size": 128,
+            "in_channels": 1,
+            "base_channels": 32,
+            "num_levels": 4,
+            "alpha": 2,
+            "offset_scale": 0.1,
+            "norm_groups": 8,
+            "dropout": 0.0,
+        }
+        args, _ = parse_args(
+            [
+                "--input",
+                "case.npz",
+                "--output-dir",
+                "output",
+                "--init-method",
+                "gcp",
+                "--gcp-checkpoint",
+                "best_gcp.pt",
+                "--expected-gcp-model-config-json",
+                json.dumps(expected),
+            ]
+        )
+        self.assertEqual(args.expected_gcp_model_config, expected)
 
     def test_monocular_initializer_selects_exactly_first_requested_view(self):
         self.assertEqual(select_gcp_initialization_view([3, 5]), 3)
