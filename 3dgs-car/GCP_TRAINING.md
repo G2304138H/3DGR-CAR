@@ -54,7 +54,8 @@ example, `.../lca/1/prefix_02.npz` is matched to `lca_0001.npz`, and
 Two ready-to-run configurations are provided:
 
 - `configs/gcp_imagecas_lca.json` uses the LCA projection directory and checks
-  that every archive reports `0.65` mm detector pixels.
+  for `0.65` mm detector pixels, falling back to `0.65` mm when that field is
+  absent.
 - `configs/gcp_imagecas_rca.json` uses the RCA projection directory and checks
   for `0.55` mm detector pixels, falling back to `0.55` mm and `0.9` m SID
   when those fields are absent.

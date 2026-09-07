@@ -10,6 +10,7 @@
     "output_dir": "/export/home2/reny0012/result/3dgr_car_gcp/lca",
     "cache_dir": "/export/home2/reny0012/result/3dgr_car_gcp/target_cache/lca",
     "expected_detector_pixel_spacing_mm": 0.65,
+    "fallback_detector_pixel_spacing_mm": 0.65,
     "source_origin_distance_m": 0.75,
     "image_size": 128,
     "volume_size": 128,
