@@ -1205,6 +1205,7 @@ def write_aggregate_reports(
 
     fieldnames = [
         "split",
+        "evaluation_split",
         "split_case_id",
         "case_name",
         "vessel_type",
@@ -1241,6 +1242,7 @@ def write_aggregate_reports(
         "optimization_seconds_per_iteration",
         "optimization_iterations_completed",
         "optimization_early_stopped",
+        "visualization_artifacts_enabled",
         "case_cache_removed",
         "error",
     ]

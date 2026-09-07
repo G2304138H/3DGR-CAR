@@ -841,6 +841,7 @@ def _write_combined_outputs(
             record = dict(original)
             record["eval_num_views"] = count
             record["view_label"] = view_label
+            record["role"] = "optimized"
             record["selected_view_indices"] = list(selected_indices)
             records.append(record)
             artifact = record.get("evaluation_arrays")
@@ -850,6 +851,7 @@ def _write_combined_outputs(
                         "case_id": record.get("case_name"),
                         "split": record.get("split"),
                         "eval_num_views": count,
+                        "role": "optimized",
                         "path": str(artifact),
                     }
                 )
@@ -880,6 +882,10 @@ def _write_combined_outputs(
             "gaussian_optimization_per_case": True,
         },
         "evaluation": evaluation_summary,
+        "roles_by_view_count": {
+            label: {"optimized": summary}
+            for label, summary in summaries.items()
+        },
         "per_case_metrics_file": "performance_per_case.json",
         "output_layout": {
             "visualization": (
