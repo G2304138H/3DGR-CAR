@@ -301,6 +301,43 @@ python -m evaluate_gcp --config configs/eval_gcp_paper_metric_rca_val_test.json
 Add `--dry-run` to either command to resolve the paths and write the evaluation
 plan without running any Gaussian optimization.
 
+### Visualize one selected LCA or RCA case
+
+`visualize_gcp_case.py` provides the single-case equivalent of the parametric
+model's visualization evaluation. It selects one artery-specific configuration
+and one numeric case ID, then runs the complete GCP-to-Gaussian pipeline.
+
+For example, visualize RCA case 508 with:
+
+```console
+python -m visualize_gcp_case --artery rca --case-number 508
+```
+
+Visualize LCA case 17 with:
+
+```console
+python -m visualize_gcp_case --artery lca --case-number 17
+```
+
+The settings are stored in:
+
+- `configs/eval_gcp_visualisation_rca_case.json`
+- `configs/eval_gcp_visualisation_lca_case.json`
+
+The configurations use the combined `val_test` split. Add `--split test` or
+`--split val` when the case should be restricted to one split. Case 508, for
+example, is resolved as `rca_0508`; the split loader also accepts numeric case
+references in the split JSON.
+
+Each invocation creates a case-specific output root below the configured
+`eval_output_dir`. The `visualization/k<N>/cases/<case>` directories retain the
+initial GCP centers and volume, optimized Gaussian `.pt`/`.npz` files,
+reconstructed `.npy`/NIfTI/GIF volumes, input-view and novel-view reprojection
+montages, optimization timing, run metadata, and per-case metrics. The first
+selected view initializes the GCP; every selected view participates in the
+Gaussian primitive optimization. Add `--dry-run` to inspect the resolved plan
+without starting CUDA work.
+
 ## Explicit reproduction choices
 
 The paper does not specify the exact U-Net width, downsampling factor, offset

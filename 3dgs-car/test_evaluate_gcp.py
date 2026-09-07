@@ -9,6 +9,7 @@ from pathlib import Path
 from evaluate_gcp import (
     build_stage2_arguments,
     main,
+    parse_args,
     resolve_evaluation_config,
     resolve_view_sweep,
 )
@@ -163,6 +164,33 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                 ],
             )
 
+    def test_cli_case_and_split_overrides_replace_config_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._fixture(Path(directory))
+            resolved = resolve_evaluation_config(
+                config_path,
+                eval_case_ids_override=["lca_0042"],
+                eval_split_override="test",
+            )
+            self.assertEqual(resolved["eval_case_ids"], ["lca_0042"])
+            self.assertEqual(resolved["eval_split"], "test")
+
+    def test_case_number_cli_alias_is_repeatable(self):
+        args = parse_args(
+            [
+                "--config",
+                "evaluation.json",
+                "--case-number",
+                "42",
+                "--case-id",
+                "lca_0043",
+                "--split",
+                "val",
+            ]
+        )
+        self.assertEqual(args.case_ids, ["42", "lca_0043"])
+        self.assertEqual(args.split, "val")
+
     def test_stage2_arguments_force_gcp_and_keep_all_optimization_views(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -202,6 +230,22 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             stage2_args, trainer_args = parse_stage2_args(arguments)
             self.assertEqual(stage2_args.view_indices, [3, 5])
             self.assertIn("--gcp-checkpoint", trainer_args)
+
+    def test_all_unselected_novel_views_preserves_trainer_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resolved = resolve_evaluation_config(
+                self._fixture(root, mode="visualisation")
+            )
+            resolved["gaussian_optimization"]["novel_view_indices"] = (
+                "all_unselected"
+            )
+            arguments = build_stage2_arguments(
+                resolved,
+                run_output_dir=root / "run",
+                view_indices=[3, 5],
+            )
+            self.assertNotIn("--novel-view-indices", arguments)
 
     def test_dry_run_writes_resolved_config_and_plan_without_evaluation(self):
         with tempfile.TemporaryDirectory() as directory:

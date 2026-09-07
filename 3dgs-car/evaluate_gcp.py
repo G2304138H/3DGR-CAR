@@ -353,6 +353,8 @@ def resolve_evaluation_config(
     *,
     checkpoint_override: Optional[str] = None,
     output_dir_override: Optional[str] = None,
+    eval_case_ids_override: Optional[Sequence[str]] = None,
+    eval_split_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Load and fully resolve one JSON evaluation configuration."""
 
@@ -520,10 +522,18 @@ def resolve_evaluation_config(
             "gaussian_optimization.early_stop_checks must be positive."
         )
 
-    eval_split = str(config.get("eval_split", "val_test")).strip()
+    eval_split = str(
+        eval_split_override
+        if eval_split_override is not None
+        else config.get("eval_split", "val_test")
+    ).strip()
     if not eval_split:
         raise ValueError("eval_split must not be empty.")
-    eval_case_ids_raw = config.get("eval_case_ids")
+    eval_case_ids_raw = (
+        eval_case_ids_override
+        if eval_case_ids_override is not None
+        else config.get("eval_case_ids")
+    )
     if eval_case_ids_raw is not None:
         if not isinstance(eval_case_ids_raw, list) or not eval_case_ids_raw:
             raise ValueError("eval_case_ids must be null or a non-empty list.")
@@ -677,12 +687,20 @@ def _trainer_arguments(resolved: Mapping[str, Any]) -> List[str]:
 
     if "novel_view_indices" in optimization:
         raw_indices = optimization["novel_view_indices"]
-        if not isinstance(raw_indices, list):
+        if (
+            isinstance(raw_indices, str)
+            and raw_indices.strip().lower().replace("-", "_")
+            == "all_unselected"
+        ):
+            raw_indices = None
+        elif not isinstance(raw_indices, list):
             raise ValueError(
-                "gaussian_optimization.novel_view_indices must be an integer list."
+                "gaussian_optimization.novel_view_indices must be an integer "
+                "list or 'all_unselected'."
             )
-        arguments.append("--novel-view-indices")
-        arguments.extend(str(int(index)) for index in raw_indices)
+        if raw_indices is not None:
+            arguments.append("--novel-view-indices")
+            arguments.extend(str(int(index)) for index in raw_indices)
 
     extra = optimization.get("extra_trainer_args", [])
     if not isinstance(extra, list) or any(not isinstance(value, str) for value in extra):
@@ -1088,6 +1106,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Optional output-directory override.",
     )
     parser.add_argument(
+        "--case-id",
+        "--case_id",
+        "--case-number",
+        "--case_number",
+        action="append",
+        dest="case_ids",
+        default=None,
+        help=(
+            "Evaluate a specific case ID or numeric case number. Repeat to "
+            "select multiple cases; overrides eval_case_ids from the JSON."
+        ),
+    )
+    parser.add_argument(
+        "--split",
+        choices=("train", "val", "test", "val_test"),
+        default=None,
+        help="Optional eval_split override.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Resolve and write the evaluation plan without running CUDA work.",
@@ -1101,6 +1138,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         Path(args.config),
         checkpoint_override=args.checkpoint,
         output_dir_override=args.output_dir,
+        eval_case_ids_override=args.case_ids,
+        eval_split_override=args.split,
     )
     output_dir = Path(str(resolved["eval_output_dir"]))
     output_dir.mkdir(parents=True, exist_ok=True)
