@@ -85,11 +85,20 @@ def validate_view_indices(view_indices: Sequence[int], num_views: int) -> np.nda
 def load_stage2_projection_case(
     path: str,
     source_origin_distance_m: float = DEFAULT_SOURCE_ORIGIN_DISTANCE_M,
+    fallback_detector_pixel_spacing_mm: Optional[float] = None,
+    fallback_sid_m: Optional[float] = None,
 ) -> Stage2ProjectionCase:
     npz_path = Path(path).expanduser().resolve()
     with np.load(npz_path, allow_pickle=False) as data:
-        required = {"images", "theta_deg", "phi_deg", "sid", "imager_pixel_spacing"}
+        required = {"images", "theta_deg", "phi_deg"}
         missing = sorted(required.difference(data.files))
+        if "sid" not in data.files and fallback_sid_m is None:
+            missing.append("sid")
+        if (
+            "imager_pixel_spacing" not in data.files
+            and fallback_detector_pixel_spacing_mm is None
+        ):
+            missing.append("imager_pixel_spacing")
         if missing:
             raise KeyError(f"{npz_path} is missing required keys: {missing}.")
 
@@ -108,7 +117,11 @@ def load_stage2_projection_case(
         if not np.isfinite(images).all() or not np.isfinite(theta_deg).all() or not np.isfinite(phi_deg).all():
             raise ValueError("Projection arrays contain NaN or infinity.")
 
-        sid_m = float(_scalar(data, "sid"))
+        sid_m = (
+            float(_scalar(data, "sid"))
+            if "sid" in data.files
+            else float(fallback_sid_m)
+        )
         source_distance_m = float(source_origin_distance_m)
         detector_distance_m = sid_m - source_distance_m
         if sid_m <= 0.0 or source_distance_m <= 0.0 or detector_distance_m <= 0.0:
@@ -117,18 +130,27 @@ def load_stage2_projection_case(
                 f"SID={sid_m} m and source distance={source_distance_m} m."
             )
 
-        spacing_value = float(_scalar(data, "imager_pixel_spacing"))
-        spacing_units = (
-            str(_scalar(data, "imager_pixel_spacing_units")).strip().lower()
-            if "imager_pixel_spacing_units" in data.files
-            else "mm"
-        )
-        if spacing_units in {"mm", "millimeter", "millimeters", "millimetre", "millimetres"}:
-            detector_pixel_spacing_m = spacing_value * 1.0e-3
-        elif spacing_units in {"m", "meter", "meters", "metre", "metres"}:
-            detector_pixel_spacing_m = spacing_value
+        if "imager_pixel_spacing" in data.files:
+            spacing_value = float(_scalar(data, "imager_pixel_spacing"))
+            spacing_units = (
+                str(_scalar(data, "imager_pixel_spacing_units")).strip().lower()
+                if "imager_pixel_spacing_units" in data.files
+                else "mm"
+            )
+            if spacing_units in {
+                "mm", "millimeter", "millimeters", "millimetre", "millimetres",
+            }:
+                detector_pixel_spacing_m = spacing_value * 1.0e-3
+            elif spacing_units in {"m", "meter", "meters", "metre", "metres"}:
+                detector_pixel_spacing_m = spacing_value
+            else:
+                raise ValueError(
+                    f"Unsupported imager_pixel_spacing_units={spacing_units!r}."
+                )
         else:
-            raise ValueError(f"Unsupported imager_pixel_spacing_units={spacing_units!r}.")
+            detector_pixel_spacing_m = (
+                float(fallback_detector_pixel_spacing_mm) * 1.0e-3
+            )
         if detector_pixel_spacing_m <= 0.0:
             raise ValueError("Detector pixel spacing must be positive.")
 
@@ -248,4 +270,3 @@ def stage2_angles_to_cone_vectors(
     if vectors.shape[1] != 12 or not np.isfinite(vectors).all():
         raise ValueError(f"Invalid ASTRA cone vectors with shape {vectors.shape}.")
     return np.asarray(vectors, dtype=np.float32)
-

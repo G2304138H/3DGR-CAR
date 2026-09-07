@@ -309,6 +309,8 @@ class PairedGCPDataset(Dataset):
         cache_dir: Optional[str | Path] = None,
         max_points: Optional[int] = None,
         source_origin_distance_m: float = DEFAULT_SOURCE_ORIGIN_DISTANCE_M,
+        fallback_detector_pixel_spacing_mm: Optional[float] = None,
+        fallback_sid_m: Optional[float] = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must contain at least one GCPCasePair.")
@@ -324,6 +326,14 @@ class PairedGCPDataset(Dataset):
         )
         self.max_points = None if max_points is None else int(max_points)
         self.source_origin_distance_m = float(source_origin_distance_m)
+        self.fallback_detector_pixel_spacing_mm = (
+            None
+            if fallback_detector_pixel_spacing_mm is None
+            else float(fallback_detector_pixel_spacing_mm)
+        )
+        self.fallback_sid_m = (
+            None if fallback_sid_m is None else float(fallback_sid_m)
+        )
         if self.volume_size < 2 or self.image_size <= 0:
             raise ValueError("volume_size must be >=2 and image_size must be positive.")
         if self.downsample_factor <= 0 or self.image_size % self.downsample_factor != 0:
@@ -339,6 +349,15 @@ class PairedGCPDataset(Dataset):
             or self.source_origin_distance_m <= 0.0
         ):
             raise ValueError("source_origin_distance_m must be finite and positive.")
+        for name, value in (
+            (
+                "fallback_detector_pixel_spacing_mm",
+                self.fallback_detector_pixel_spacing_mm,
+            ),
+            ("fallback_sid_m", self.fallback_sid_m),
+        ):
+            if value is not None and (not np.isfinite(value) or value <= 0.0):
+                raise ValueError(f"{name} must be finite and positive when provided.")
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -396,6 +415,10 @@ class PairedGCPDataset(Dataset):
         case = load_stage2_projection_case(
             str(self.pairs[pair_index].projection_path),
             source_origin_distance_m=self.source_origin_distance_m,
+            fallback_detector_pixel_spacing_mm=(
+                self.fallback_detector_pixel_spacing_mm
+            ),
+            fallback_sid_m=self.fallback_sid_m,
         )
         expected_spacing = self.pairs[pair_index].expected_detector_pixel_spacing_mm
         if expected_spacing is not None:
@@ -470,6 +493,10 @@ class PairedGCPDataset(Dataset):
             "downsample_factor": self.downsample_factor,
             "max_points": self.max_points,
             "source_origin_distance_m": self.source_origin_distance_m,
+            "fallback_detector_pixel_spacing_mm": (
+                self.fallback_detector_pixel_spacing_mm
+            ),
+            "fallback_sid_m": self.fallback_sid_m,
             "expected_detector_pixel_spacing_mm": (
                 pair.expected_detector_pixel_spacing_mm
             ),

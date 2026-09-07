@@ -407,6 +407,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "in each projection NPZ."
         ),
     )
+    parser.add_argument(
+        "--fallback-detector-pixel-spacing-mm",
+        type=float,
+        default=None,
+        help=(
+            "Detector pixel spacing in mm used only when a projection NPZ has no "
+            "imager_pixel_spacing key."
+        ),
+    )
+    parser.add_argument(
+        "--fallback-sid-m",
+        type=float,
+        default=None,
+        help="SID in metres used only when a projection NPZ has no sid key.",
+    )
     parser.add_argument("--downsample-factor", type=int, default=2)
     parser.add_argument("--offset-scale", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -477,6 +492,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error(
             "--expected-detector-pixel-spacing-mm must be finite and positive."
         )
+    for option, value in (
+        (
+            "--fallback-detector-pixel-spacing-mm",
+            args.fallback_detector_pixel_spacing_mm,
+        ),
+        ("--fallback-sid-m", args.fallback_sid_m),
+    ):
+        if value is not None and (
+            not math.isfinite(float(value)) or float(value) <= 0.0
+        ):
+            parser.error(f"{option} must be finite and positive.")
     return args
 
 
@@ -532,6 +558,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cache_dir=cache_dir,
         max_points=int(args.max_points),
         source_origin_distance_m=float(args.source_origin_distance_m),
+        fallback_detector_pixel_spacing_mm=(
+            args.fallback_detector_pixel_spacing_mm
+        ),
+        fallback_sid_m=args.fallback_sid_m,
     )
     train_dataset = PairedGCPDataset(train_pairs, **dataset_kwargs)
     validation_dataset = PairedGCPDataset(validation_pairs, **dataset_kwargs)

@@ -8,10 +8,13 @@ subsequent projection optimization.
 
 ## Paired data
 
-The projection NPZ must follow the Stage-2 contract documented in
-`STAGE2_NPZ_RECONSTRUCTION.md`. In particular, it supplies `images`,
-`theta_deg`, `phi_deg`, `sid`, `imager_pixel_spacing`, and optionally
-`projection_center_offset`, `vessel_type`, and `case_id`.
+The projection NPZ must supply `images`, `theta_deg`, and `phi_deg`. Normally it
+also follows the Stage-2 contract documented in `STAGE2_NPZ_RECONSTRUCTION.md`
+and supplies `sid` and `imager_pixel_spacing`. Older archives may obtain either
+missing value from `fallback_sid_m` and
+`fallback_detector_pixel_spacing_mm` in the training configuration. A value
+stored in an archive always takes precedence over its fallback. Optional fields
+include `projection_center_offset`, `vessel_type`, and `case_id`.
 
 The matched ground-truth NPZ supplies a binary 3D volume and physical spacing.
 For the ImageCAS files used here:
@@ -53,13 +56,14 @@ Two ready-to-run configurations are provided:
 - `configs/gcp_imagecas_lca.json` uses the LCA projection directory and checks
   that every archive reports `0.65` mm detector pixels.
 - `configs/gcp_imagecas_rca.json` uses the RCA projection directory and checks
-  that every archive reports `0.55` mm detector pixels.
+  for `0.55` mm detector pixels, falling back to `0.55` mm and `0.9` m SID
+  when those fields are absent.
 
-The check does not override calibration. Ray geometry always uses the
-`imager_pixel_spacing` stored in each individual projection NPZ. The resulting
-default reconstruction extent is therefore approximately `0.1387` m for LCA
-and `0.1173` m for RCA with a 256-pixel detector, 0.75 m source-to-isocentre
-distance, and 0.9 m SID.
+The check does not override calibration. Ray geometry uses calibration stored
+in each individual projection NPZ when available and the configured fallback
+otherwise. The resulting default reconstruction extent is approximately
+`0.1387` m for LCA and `0.1173` m for RCA with a 256-pixel detector, 0.75 m
+source-to-isocentre distance, and 0.9 m SID.
 
 Train separate LCA and RCA predictors with these independently generated split
 files. Combining them into one model could put the LCA and RCA of the same

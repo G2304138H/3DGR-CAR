@@ -236,6 +236,51 @@ class PairAndDatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "pixel spacing"):
                 _ = dataset[0]
 
+    def test_missing_calibration_uses_configured_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            projection_path = root / "rca_0001.npz"
+            ground_truth_path = root / "1.npz"
+            np.savez(
+                projection_path,
+                sample_name=np.asarray("rca_0001"),
+                vessel_type=np.asarray("rca"),
+                case_id=np.asarray("1"),
+                images=np.zeros((1, 8, 8), dtype=np.float32),
+                theta_deg=np.zeros(1, dtype=np.float32),
+                phi_deg=np.full(1, 90.0, dtype=np.float32),
+            )
+            volume_xyz = np.zeros((5, 5, 5), dtype=np.uint8)
+            volume_xyz[2, 2, 2] = 1
+            np.savez(
+                ground_truth_path,
+                vol=volume_xyz,
+                spacing=np.full(3, 100.0, dtype=np.float32),
+            )
+            pair = GCPCasePair(
+                projection_path,
+                ground_truth_path,
+                case_name="rca_0001",
+                vessel_type="rca",
+                case_id="1",
+                expected_detector_pixel_spacing_mm=0.55,
+            )
+            dataset = PairedGCPDataset(
+                [pair],
+                volume_size=5,
+                image_size=4,
+                volume_extent_m=0.4,
+                fallback_detector_pixel_spacing_mm=0.55,
+                fallback_sid_m=0.9,
+            )
+
+            projection = dataset._projection_case(0)
+            sample = dataset[0]
+
+            self.assertAlmostEqual(projection.detector_pixel_spacing_m, 0.00055)
+            self.assertAlmostEqual(projection.sid_m, 0.9)
+            self.assertEqual(tuple(sample["image"].shape), (1, 4, 4))
+
     def test_collate_pads_variable_point_clouds(self) -> None:
         if torch is None:
             first_points = np.ones((2, 3), dtype=np.float32)

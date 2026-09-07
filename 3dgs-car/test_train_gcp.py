@@ -67,6 +67,8 @@ class SplitParsingTests(unittest.TestCase):
                 "split_json": "/split.json",
                 "output_dir": "/output",
                 "expected_detector_pixel_spacing_mm": 0.65,
+                "fallback_detector_pixel_spacing_mm": 0.65,
+                "fallback_sid_m": 0.9,
                 "epochs": 100,
                 "amp": True,
             },
@@ -77,6 +79,8 @@ class SplitParsingTests(unittest.TestCase):
             args = parse_args(["--config", str(path), "--epochs", "3", "--no-amp"])
         self.assertEqual(args.projection_dir, "/projection")
         self.assertEqual(args.expected_detector_pixel_spacing_mm, 0.65)
+        self.assertEqual(args.fallback_detector_pixel_spacing_mm, 0.65)
+        self.assertEqual(args.fallback_sid_m, 0.9)
         self.assertEqual(args.epochs, 3)
         self.assertFalse(args.amp)
 
