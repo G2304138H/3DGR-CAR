@@ -51,14 +51,29 @@ class Stage2ProjectionCase:
         detector_width_m = self.detector_pixel_spacing_m * self.detector_shape[1]
         return detector_width_m * self.source_origin_distance_m / self.sid_m
 
-    def cone_vectors(self, view_indices: Optional[Sequence[int]] = None) -> np.ndarray:
+    def cone_vectors(
+        self,
+        view_indices: Optional[Sequence[int]] = None,
+        *,
+        theta_change_deg: float = 0.0,
+        phi_change_deg: float = 0.0,
+    ) -> np.ndarray:
+        """Build cone vectors from the stored or deliberately perturbed poses.
+
+        The fixed changes are evaluation-only assumed-geometry errors.  They do
+        not mutate the case arrays or projection images.
+        """
         if view_indices is None:
             indices = np.arange(self.num_views, dtype=np.int64)
         else:
             indices = validate_view_indices(view_indices, self.num_views)
+        theta_change = float(theta_change_deg)
+        phi_change = float(phi_change_deg)
+        if not np.isfinite(theta_change) or not np.isfinite(phi_change):
+            raise ValueError("View-direction changes must be finite degrees.")
         return stage2_angles_to_cone_vectors(
-            theta_deg=self.theta_deg[indices],
-            phi_deg=self.phi_deg[indices],
+            theta_deg=self.theta_deg[indices] + theta_change,
+            phi_deg=self.phi_deg[indices] + phi_change,
             sid_m=self.sid_m,
             source_origin_distance_m=self.source_origin_distance_m,
             detector_pixel_spacing_m=self.detector_pixel_spacing_m,

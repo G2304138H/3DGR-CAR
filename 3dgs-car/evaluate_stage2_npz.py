@@ -1292,6 +1292,20 @@ def load_case_optimization_timing(case_output_dir: Path) -> Dict[str, object]:
     }
 
 
+def load_case_view_direction_metadata(case_output_dir: Path) -> Dict[str, object]:
+    """Keep assumed input-pose records before json-only cache cleanup."""
+
+    metadata_path = case_output_dir / "run_metadata.json"
+    if not metadata_path.is_file():
+        return {}
+    with metadata_path.open("r", encoding="utf-8") as stream:
+        metadata = json.load(stream)
+    view_directions = metadata.get("evaluation_view_directions")
+    if not isinstance(view_directions, Mapping):
+        return {}
+    return {"evaluation_view_directions": dict(view_directions)}
+
+
 def remove_temporary_case_cache(case_output_dir: Path, cache_root: Path) -> None:
     resolved_case = case_output_dir.resolve()
     resolved_root = cache_root.resolve()
@@ -1756,6 +1770,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
 
             record.update(load_case_optimization_timing(case_output_dir))
+            record.update(load_case_view_direction_metadata(case_output_dir))
             metrics_timer_start = time.perf_counter()
             prediction = _squeeze_volume(
                 np.load(reconstruction_path, allow_pickle=False),

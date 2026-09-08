@@ -317,6 +317,42 @@ def resolve_projection_loss_alpha(
     return alpha
 
 
+def fixed_view_direction_records(
+    case: Stage2ProjectionCase,
+    view_indices: Sequence[int],
+    *,
+    theta_change_deg: float,
+    phi_change_deg: float,
+) -> Tuple[np.ndarray, np.ndarray, list[Dict[str, Any]]]:
+    """Resolve one fixed assumed-pose error for every selected input view."""
+
+    indices = validate_view_indices(view_indices, case.num_views)
+    theta_change = float(theta_change_deg)
+    phi_change = float(phi_change_deg)
+    if not math.isfinite(theta_change) or not math.isfinite(phi_change):
+        raise ValueError("View-direction changes must be finite degrees.")
+    evaluated_theta = np.asarray(
+        case.theta_deg[indices] + theta_change, dtype=np.float32
+    )
+    evaluated_phi = np.asarray(
+        case.phi_deg[indices] + phi_change, dtype=np.float32
+    )
+    records = [
+        {
+            "model_view_position": int(position),
+            "selected_view_index": int(index),
+            "original_theta_deg": float(case.theta_deg[index]),
+            "theta_change_deg": theta_change,
+            "evaluated_theta_deg": float(evaluated_theta[position]),
+            "original_phi_deg": float(case.phi_deg[index]),
+            "phi_change_deg": phi_change,
+            "evaluated_phi_deg": float(evaluated_phi[position]),
+        }
+        for position, index in enumerate(indices)
+    ]
+    return evaluated_theta, evaluated_phi, records
+
+
 def build_centerline_skeleton_masks(
     target: torch.Tensor,
     threshold: float = 0.5,
@@ -398,6 +434,9 @@ def predict_gcp_initial_centers(
     volume_extent_m: float,
     device: torch.device,
     expected_model_config: Optional[Mapping[str, Any]] = None,
+    selected_cone_vectors: Optional[np.ndarray] = None,
+    evaluated_theta_deg: Optional[Sequence[float]] = None,
+    evaluated_phi_deg: Optional[Sequence[float]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """Run the monocular GCP on exactly the first selected Stage-2 view."""
     # These imports are intentionally lazy: legacy FDK/BP runs should not load
@@ -456,11 +495,22 @@ def predict_gcp_initial_centers(
 
     prediction = model(image)
     output_shape = tuple(int(value) for value in prediction["depth"].shape[-2:])
-    original_cone_vector = case.cone_vectors(
-        np.asarray([initialization_view_index], dtype=np.int64)
-    )[0]
+    selected_indices = validate_view_indices(view_indices, case.num_views)
+    if selected_cone_vectors is None:
+        initialization_cone_vector = case.cone_vectors(
+            np.asarray([initialization_view_index], dtype=np.int64)
+        )[0]
+    else:
+        selected_vectors = np.asarray(selected_cone_vectors, dtype=np.float32)
+        if selected_vectors.shape != (selected_indices.size, 12):
+            raise ValueError(
+                "selected_cone_vectors must align with view_indices and have "
+                f"shape {(selected_indices.size, 12)}, got "
+                f"{selected_vectors.shape}."
+            )
+        initialization_cone_vector = selected_vectors[0]
     output_cone_vector = scale_cone_vector_for_detector(
-        original_cone_vector,
+        initialization_cone_vector,
         original_shape=original_detector_shape,
         target_shape=output_shape,
     )
@@ -487,11 +537,23 @@ def predict_gcp_initial_centers(
             "Check the projection geometry and --volume-extent-m."
         )
 
+    evaluated_theta = (
+        float(case.theta_deg[initialization_view_index])
+        if evaluated_theta_deg is None
+        else float(tuple(evaluated_theta_deg)[0])
+    )
+    evaluated_phi = (
+        float(case.phi_deg[initialization_view_index])
+        if evaluated_phi_deg is None
+        else float(tuple(evaluated_phi_deg)[0])
+    )
     metadata = {
         "checkpoint": str(checkpoint),
         "initialization_view_index": int(initialization_view_index),
         "initialization_theta_deg": float(case.theta_deg[initialization_view_index]),
         "initialization_phi_deg": float(case.phi_deg[initialization_view_index]),
+        "evaluated_initialization_theta_deg": evaluated_theta,
+        "evaluated_initialization_phi_deg": evaluated_phi,
         "source_detector_shape": list(original_detector_shape),
         "input_shape": [input_size, input_size],
         "input_resize_mode": "bilinear_align_corners_false",
@@ -542,6 +604,8 @@ def export_gaussians(
     case: Stage2ProjectionCase,
     view_indices: np.ndarray,
     cone_vectors: np.ndarray,
+    evaluated_theta_deg: np.ndarray,
+    evaluated_phi_deg: np.ndarray,
     volume_extent_m: float,
     silhouette_gain: Optional[float],
 ) -> None:
@@ -572,6 +636,8 @@ def export_gaussians(
         "view_indices": torch.from_numpy(view_indices.copy()),
         "theta_deg": torch.from_numpy(case.theta_deg[view_indices].copy()),
         "phi_deg": torch.from_numpy(case.phi_deg[view_indices].copy()),
+        "evaluated_theta_deg": torch.from_numpy(evaluated_theta_deg.copy()),
+        "evaluated_phi_deg": torch.from_numpy(evaluated_phi_deg.copy()),
         "cone_vectors": torch.from_numpy(cone_vectors.copy()),
         "volume_extent_m": float(volume_extent_m),
         "projection_center_offset_m": (
@@ -592,6 +658,8 @@ def export_gaussians(
         view_indices=view_indices.astype(np.int32),
         theta_deg=case.theta_deg[view_indices],
         phi_deg=case.phi_deg[view_indices],
+        evaluated_theta_deg=evaluated_theta_deg,
+        evaluated_phi_deg=evaluated_phi_deg,
         cone_vectors=cone_vectors,
         volume_extent_m=np.asarray(volume_extent_m, dtype=np.float32),
     )
@@ -698,6 +766,8 @@ def save_input_view_reprojections(
     target: torch.Tensor,
     predictions: torch.Tensor,
     line_integrals: torch.Tensor,
+    evaluated_theta_deg: np.ndarray,
+    evaluated_phi_deg: np.ndarray,
 ) -> None:
     target_np = target[0].detach().cpu().numpy().astype(np.float32)
     prediction_np = predictions[0].detach().cpu().numpy().astype(np.float32)
@@ -711,6 +781,8 @@ def save_input_view_reprojections(
         view_indices=view_indices.astype(np.int32),
         theta_deg=case.theta_deg[view_indices],
         phi_deg=case.phi_deg[view_indices],
+        evaluated_theta_deg=evaluated_theta_deg,
+        evaluated_phi_deg=evaluated_phi_deg,
         target=target_np,
         predictions=prediction_np,
         line_integrals=line_integrals_np,
@@ -776,6 +848,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         type=float,
         default=None,
         help="SID in metres used only when the projection NPZ has no sid key.",
+    )
+    parser.add_argument(
+        "--view-direction-theta-change-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Evaluation-only fixed theta error applied to the assumed geometry "
+            "of every selected input view. Projection images are unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--view-direction-phi-change-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Evaluation-only fixed phi error applied to the assumed geometry "
+            "of every selected input view. Projection images are unchanged."
+        ),
     )
     parser.add_argument("--num-init-gaussians", type=int, default=10000)
     parser.add_argument("--air-threshold", type=float, default=0.05)
@@ -913,6 +1003,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
             not math.isfinite(float(value)) or float(value) <= 0.0
         ):
             parser.error(f"{option} must be finite and positive.")
+    for option, value in (
+        (
+            "--view-direction-theta-change-deg",
+            args.view_direction_theta_change_deg,
+        ),
+        (
+            "--view-direction-phi-change-deg",
+            args.view_direction_phi_change_deg,
+        ),
+    ):
+        if not math.isfinite(float(value)):
+            parser.error(f"{option} must be finite.")
     if args.prediction_threshold is None and args.prediction_threshold_percentile is None:
         args.prediction_threshold_percentile = float(
             DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE
@@ -953,7 +1055,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.volume_extent_m is not None
         else float(case.isocenter_fov_m)
     )
-    cone_vectors = case.cone_vectors(view_indices)
+    theta_change_deg = float(args.view_direction_theta_change_deg)
+    phi_change_deg = float(args.view_direction_phi_change_deg)
+    evaluated_theta_deg, evaluated_phi_deg, view_direction_records = (
+        fixed_view_direction_records(
+            case,
+            view_indices,
+            theta_change_deg=theta_change_deg,
+            phi_change_deg=phi_change_deg,
+        )
+    )
+    cone_vectors = case.cone_vectors(
+        view_indices,
+        theta_change_deg=theta_change_deg,
+        phi_change_deg=phi_change_deg,
+    )
     projector = AstraConeVecProjector(
         vectors=cone_vectors,
         detector_shape=case.detector_shape,
@@ -964,11 +1080,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(f"Case: {case.sample_name}")
     print(f"Views: {view_indices.tolist()}")
-    for index in view_indices:
+    for position, index in enumerate(view_indices):
         print(
             f"  {int(index)}: {case.clinical_views[index]} | "
-            f"theta={float(case.theta_deg[index]):.1f} deg, "
-            f"phi={float(case.phi_deg[index]):.1f} deg"
+            f"stored theta={float(case.theta_deg[index]):.1f} deg, "
+            f"phi={float(case.phi_deg[index]):.1f} deg | assumed "
+            f"theta={float(evaluated_theta_deg[position]):.1f} deg, "
+            f"phi={float(evaluated_phi_deg[position]):.1f} deg"
         )
     print(f"Input shape: {tuple(target.shape)}; target type: {target_type}")
     print(f"Reconstruction: {args.volume_size}^3 over {volume_extent_m:.6f} m")
@@ -1004,6 +1122,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             volume_extent_m=volume_extent_m,
             device=device,
             expected_model_config=args.expected_gcp_model_config,
+            selected_cone_vectors=cone_vectors,
+            evaluated_theta_deg=evaluated_theta_deg,
+            evaluated_phi_deg=evaluated_phi_deg,
         )
         if not args.evaluation_cache_only:
             np.save(
@@ -1205,6 +1326,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             case=case,
             view_indices=view_indices,
             cone_vectors=cone_vectors,
+            evaluated_theta_deg=evaluated_theta_deg,
+            evaluated_phi_deg=evaluated_phi_deg,
             volume_extent_m=volume_extent_m,
             silhouette_gain=silhouette_gain,
         )
@@ -1225,6 +1348,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             target=target,
             predictions=input_reprojections,
             line_integrals=input_line_integrals,
+            evaluated_theta_deg=evaluated_theta_deg,
+            evaluated_phi_deg=evaluated_phi_deg,
         )
 
     if args.evaluation_cache_only:
@@ -1324,6 +1449,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "view_indices": view_indices.tolist(),
         "theta_deg": case.theta_deg[view_indices].tolist(),
         "phi_deg": case.phi_deg[view_indices].tolist(),
+        "evaluation_view_directions": {
+            "accurate": bool(theta_change_deg == 0.0 and phi_change_deg == 0.0),
+            "distribution": "fixed_per_selected_view",
+            "theta_change_deg": theta_change_deg,
+            "phi_change_deg": phi_change_deg,
+            "num_perturbed_views": (
+                0
+                if theta_change_deg == 0.0 and phi_change_deg == 0.0
+                else int(len(view_indices))
+            ),
+            "views": view_direction_records,
+            "gcp_lifting_geometry": "assumed_geometry_first_selected_view",
+            "gaussian_optimization_geometry": "assumed_geometry_all_selected_views",
+            "projection_images_changed": False,
+            "novel_view_geometry_changed": False,
+        },
         "target_type": target_type,
         "init_method": str(args.init_method),
         "requested_num_init_gaussians": int(args.num_init_gaussians),

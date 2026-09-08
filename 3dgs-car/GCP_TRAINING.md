@@ -330,6 +330,57 @@ Both `performance_summary.json` and
 summaries. The console also prints the final mean processing time per case for
 each view count and across all case/view runs.
 
+### Evaluate inaccurate directions for both input views
+
+The `inaccurate_view_direction` mode reproduces the parametric model's fixed
+signed theta/phi robustness grid for the GCP-to-Gaussian pipeline. Run the
+accurate paper-metric configuration first; its `k2` result is the paired
+zero-error baseline. Then run LCA with:
+
+```console
+python -m evaluate_gcp --config configs/eval_gcp_inaccurate_view_direction_lca_val_test.json
+```
+
+or RCA with:
+
+```console
+python -m evaluate_gcp --config configs/eval_gcp_inaccurate_view_direction_rca_val_test.json
+```
+
+These configurations always use exactly two projection images, views 0 and 1.
+At each condition, the same fixed signed theta/phi change is applied to the
+assumed geometry of both input views. The images and source NPZ metadata are
+not edited. The inaccurate first-view geometry is used to lift the monocular
+GCP prediction into 3D Gaussian centres, and the inaccurate two-view geometry
+is used throughout Gaussian primitive optimization. Ground truth and any
+novel-view scoring geometry remain accurate.
+
+The default grid contains 24 deterministic conditions: signed theta-only and
+phi-only errors of 2, 5, 10, and 15 degrees, plus all four sign combinations
+at 5 and 10 degrees. Eight 10-degree representative conditions keep the full
+visualisation bundle for the first two cases; the remaining conditions use
+compact paper-metric output. Edit `changes_deg` to run an explicit condition
+list, or edit `axis_degrees`, `combined_degrees`, and
+`visualization_conditions_deg` in the JSON. Because every condition performs
+independent per-case optimization, the complete default sweep is 24 times the
+cost of one two-view evaluation. Add `--dry-run` to write and inspect every
+condition configuration without starting reconstruction.
+
+The robustness output root contains:
+
+- `view_direction_robustness_summary.json`, with absolute optimized metrics,
+  signed and percentage changes from the accurate `k2` baseline, timing, and
+  descriptive quadratic theta/phi response surfaces;
+- `view_direction_robustness_metrics.csv`, the flat plotting/statistics table;
+- `run_configs/<condition>.json`, the fully resolved configuration for every
+  signed condition;
+- `conditions/<condition>/performance_summary.json` and
+  `performance_per_case.json`, plus paper-metric or visualisation artifacts.
+
+Each per-case record also retains the stored angle, applied change, and
+evaluated angle for both input views under `evaluation_view_directions`, even
+when compact case caches are removed.
+
 ### Visualize one selected LCA or RCA case
 
 `visualize_gcp_case.py` provides the single-case equivalent of the parametric

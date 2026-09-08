@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -84,6 +85,8 @@ _FORBIDDEN_EXTRA_TRAINER_OPTIONS = {
     "--prediction-threshold",
     "--prediction-threshold-percentile",
     "--volume-gif-isovalue",
+    "--view-direction-theta-change-deg",
+    "--view-direction-phi-change-deg",
 }
 
 
@@ -142,14 +145,68 @@ def _normalise_evaluation_mode(raw: object) -> str:
         "visualisation_demo": "visualisation",
         "demo": "visualisation",
         "evaluation": "visualisation",
+        "inaccurate_view_directions": "inaccurate_view_direction",
+        "view_direction_robustness": "inaccurate_view_direction",
+        "view_directions_robustness": "inaccurate_view_direction",
     }
     value = aliases.get(value, value)
-    if value not in {"paper_metric", "visualisation"}:
+    if value not in {
+        "paper_metric",
+        "visualisation",
+        "inaccurate_view_direction",
+    }:
         raise ValueError(
-            "evaluation_mode must be 'paper_metric' or 'visualisation', "
+            "evaluation_mode must be 'paper_metric', 'visualisation', or "
+            "'inaccurate_view_direction', "
             f"got {raw!r}."
         )
     return value
+
+
+def resolve_evaluation_view_directions(
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate one deterministic assumed-pose condition."""
+
+    raw = config.get("evaluation_view_directions", {})
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise ValueError("evaluation_view_directions must be a JSON object.")
+    options = dict(raw)
+    options.setdefault("accurate", True)
+    options.setdefault("theta_change_deg", 0.0)
+    options.setdefault("phi_change_deg", 0.0)
+    if not isinstance(options["accurate"], bool):
+        raise ValueError("evaluation_view_directions.accurate must be boolean.")
+    for key in ("theta_change_deg", "phi_change_deg"):
+        value = options[key]
+        if isinstance(value, bool):
+            raise ValueError(f"evaluation_view_directions.{key} must be finite.")
+        try:
+            value = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"evaluation_view_directions.{key} must be finite."
+            ) from error
+        if not math.isfinite(value):
+            raise ValueError(f"evaluation_view_directions.{key} must be finite.")
+        options[key] = value
+    changed = bool(
+        options["theta_change_deg"] != 0.0
+        or options["phi_change_deg"] != 0.0
+    )
+    if options["accurate"] and changed:
+        raise ValueError(
+            "Accurate evaluation view directions require zero theta/phi changes."
+        )
+    if not options["accurate"] and not changed:
+        raise ValueError(
+            "Inaccurate evaluation view directions require a non-zero fixed "
+            "theta_change_deg or phi_change_deg."
+        )
+    options["distribution"] = "fixed_per_selected_view"
+    return options
 
 
 def _optional_positive_limit(raw: object, *, label: str) -> Optional[int]:
@@ -408,6 +465,7 @@ def resolve_evaluation_config(
             f"{unsupported_parameterization}."
         )
     mode = _normalise_evaluation_mode(config.get("evaluation_mode"))
+    view_direction_options = resolve_evaluation_view_directions(config)
     experiment_dir, checkpoint_path, checkpoint_choice = (
         _resolve_experiment_and_checkpoint(
             config,
@@ -463,9 +521,37 @@ def resolve_evaluation_config(
         base_name = (
             "evaluation_paper_metric"
             if mode == "paper_metric"
-            else "evaluation"
+            else (
+                "evaluation_inaccurate_view_direction_robustness"
+                if mode == "inaccurate_view_direction"
+                else "evaluation"
+            )
         )
-        output_dir = experiment_dir / base_name / checkpoint_path.stem
+        if (
+            mode != "inaccurate_view_direction"
+            and not bool(view_direction_options["accurate"])
+        ):
+            def format_angle(value: float) -> str:
+                return (
+                    format(float(value), ".12g")
+                    .replace("-", "minus")
+                    .replace(".", "p")
+                )
+
+            condition_name = (
+                "theta_change_"
+                f"{format_angle(view_direction_options['theta_change_deg'])}deg_"
+                "phi_change_"
+                f"{format_angle(view_direction_options['phi_change_deg'])}deg"
+            )
+            output_dir = (
+                experiment_dir
+                / f"{base_name}_inaccurate_view_directions"
+                / condition_name
+                / checkpoint_path.stem
+            )
+        else:
+            output_dir = experiment_dir / base_name / checkpoint_path.stem
     else:
         output_dir = _resolve_path(
             output_raw,
@@ -555,6 +641,13 @@ def resolve_evaluation_config(
     if eval_view_indices_override is not None:
         view_config["eval_view_indices"] = list(eval_view_indices_override)
     view_sweep = resolve_view_sweep(view_config)
+    if mode == "inaccurate_view_direction" and (
+        len(view_sweep) != 1 or int(view_sweep[0][0]) != 2
+    ):
+        raise ValueError(
+            "inaccurate_view_direction evaluation requires exactly two input "
+            "views: set eval_num_views to 2 and provide two eval_view_indices."
+        )
 
     prediction_threshold = config.get("paper_metric_volume_threshold")
     if prediction_threshold is None:
@@ -656,6 +749,7 @@ def resolve_evaluation_config(
         "eval_view_selection_seed": int(
             config.get("eval_view_selection_seed", 42)
         ),
+        "evaluation_view_directions": view_direction_options,
         "effective_view_sweep": [
             {"eval_num_views": count, "view_indices": indices}
             for count, indices in view_sweep
@@ -869,6 +963,17 @@ def build_stage2_arguments(
         if maximum is not None:
             arguments.extend(("--max-visualizations", str(maximum)))
 
+    view_directions = dict(resolved["evaluation_view_directions"])
+    if not bool(view_directions["accurate"]):
+        arguments.extend(
+            (
+                "--view-direction-theta-change-deg",
+                str(float(view_directions["theta_change_deg"])),
+                "--view-direction-phi-change-deg",
+                str(float(view_directions["phi_change_deg"])),
+            )
+        )
+
     arguments.extend(_trainer_arguments(resolved))
     return arguments
 
@@ -952,6 +1057,10 @@ def _write_combined_outputs(
             record["view_label"] = view_label
             record["role"] = "optimized"
             record["selected_view_indices"] = list(selected_indices)
+            record.setdefault(
+                "evaluation_view_directions",
+                dict(resolved["evaluation_view_directions"]),
+            )
             records.append(record)
             artifact = record.get("evaluation_arrays")
             if artifact is not None:
@@ -1028,6 +1137,12 @@ def _write_combined_outputs(
             "eval_view_selection_seed": resolved["eval_view_selection_seed"],
             "initialization": "monocular_gcp_first_selected_view",
             "gaussian_optimization_per_case": True,
+            "view_directions_accurate": bool(
+                resolved["evaluation_view_directions"]["accurate"]
+            ),
+            "evaluation_view_directions": dict(
+                resolved["evaluation_view_directions"]
+            ),
         },
         "evaluation": evaluation_summary,
         "roles_by_view_count": {
@@ -1233,6 +1348,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stage2_evaluation.write_json(output_dir / "resolved_config.json", resolved)
 
     mode = str(resolved["evaluation_mode"])
+    if mode == "inaccurate_view_direction":
+        from gcp_view_direction_robustness import run_view_direction_robustness
+
+        aggregate_path = run_view_direction_robustness(
+            resolved=resolved,
+            config_path=Path(args.config).expanduser().resolve(),
+            evaluator_path=Path(__file__).resolve(),
+            dry_run=bool(args.dry_run),
+        )
+        action = "Saved robustness plan" if args.dry_run else "Saved robustness summary"
+        print(f"{action}: {aggregate_path}", flush=True)
+        return 0
+
     plan_runs: List[Dict[str, Any]] = []
     for view in resolved["effective_view_sweep"]:
         count = int(view["eval_num_views"])
@@ -1262,6 +1390,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "gcp_checkpoint": resolved["checkpoint_path"],
         "initialization_view_rule": "first selected view only",
         "optimization_view_rule": "all selected views",
+        "evaluation_view_directions": resolved["evaluation_view_directions"],
         "runs": plan_runs,
     }
     stage2_evaluation.write_json(output_dir / "evaluation_plan.json", plan)

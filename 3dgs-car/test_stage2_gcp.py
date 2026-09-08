@@ -58,6 +58,22 @@ class Stage2GCPHelperTests(unittest.TestCase):
         )
         self.assertEqual(args.expected_gcp_model_config, expected)
 
+    def test_fixed_view_direction_arguments_are_parsed(self):
+        args, _ = parse_args(
+            [
+                "--input",
+                "case.npz",
+                "--output-dir",
+                "output",
+                "--view-direction-theta-change-deg",
+                "5",
+                "--view-direction-phi-change-deg",
+                "-2.5",
+            ]
+        )
+        self.assertEqual(args.view_direction_theta_change_deg, 5.0)
+        self.assertEqual(args.view_direction_phi_change_deg, -2.5)
+
     def test_monocular_initializer_selects_exactly_first_requested_view(self):
         self.assertEqual(select_gcp_initialization_view([3, 5]), 3)
         self.assertEqual(select_gcp_initialization_view([6, 0, 4]), 6)

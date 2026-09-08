@@ -27,7 +27,7 @@ from evaluate_stage2_npz import (
     translate_volume_zyx,
 )
 from volume_gif import resolve_volume_isovalue
-from stage2_npz_data import validate_view_indices
+from stage2_npz_data import Stage2ProjectionCase, validate_view_indices
 
 
 class SplitLoadingTests(unittest.TestCase):
@@ -79,6 +79,25 @@ class SplitLoadingTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
+                (case_output / "run_metadata.json").write_text(
+                    json.dumps(
+                        {
+                            "evaluation_view_directions": {
+                                "accurate": False,
+                                "theta_change_deg": 5.0,
+                                "phi_change_deg": -2.0,
+                                "views": [
+                                    {
+                                        "selected_view_index": 0,
+                                        "original_theta_deg": 10.0,
+                                        "evaluated_theta_deg": 15.0,
+                                    }
+                                ],
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
 
             argv = [
                 "--input-dir", str(projections),
@@ -119,6 +138,11 @@ class SplitLoadingTests(unittest.TestCase):
             self.assertEqual(
                 results["cases"][0]["optimization_elapsed_seconds"],
                 12.5,
+            )
+            self.assertEqual(
+                results["cases"][0]["evaluation_view_directions"]
+                ["theta_change_deg"],
+                5.0,
             )
             self.assertTrue(results["cases"][0]["case_cache_removed"])
             view_index = received_training_args.index("--view-indices")
@@ -181,6 +205,30 @@ class SplitLoadingTests(unittest.TestCase):
             validate_view_indices([0, 2, 4, 6], 7),
             [0, 2, 4, 6],
         )
+
+    def test_fixed_direction_changes_only_alter_assumed_cone_geometry(self):
+        theta = np.asarray([10.0, 30.0], dtype=np.float32)
+        phi = np.asarray([-5.0, 15.0], dtype=np.float32)
+        case = Stage2ProjectionCase(
+            path=Path("case.npz"),
+            sample_name="case",
+            images=np.zeros((2, 8, 8), dtype=np.float32),
+            theta_deg=theta,
+            phi_deg=phi,
+            sid_m=0.9,
+            source_origin_distance_m=0.75,
+            detector_origin_distance_m=0.15,
+            detector_pixel_spacing_m=0.00055,
+            clinical_views=np.asarray(["a", "b"]),
+            projection_center_offset_m=None,
+        )
+        accurate = case.cone_vectors([0, 1])
+        inaccurate = case.cone_vectors(
+            [0, 1], theta_change_deg=5.0, phi_change_deg=-2.0
+        )
+        self.assertFalse(np.allclose(accurate, inaccurate))
+        np.testing.assert_array_equal(case.theta_deg, theta)
+        np.testing.assert_array_equal(case.phi_deg, phi)
 
     def test_metric_and_timing_summaries_record_standard_error(self):
         records = []

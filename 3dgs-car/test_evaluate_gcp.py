@@ -11,12 +11,32 @@ from evaluate_gcp import (
     main,
     parse_args,
     resolve_evaluation_config,
+    resolve_evaluation_view_directions,
     resolve_view_sweep,
 )
 from evaluate_stage2_npz import METRIC_NAMES, parse_args as parse_stage2_args
 
 
 class GcpEvaluationConfigTests(unittest.TestCase):
+    def test_concrete_inaccurate_direction_configs_are_two_view_jobs(self):
+        config_dir = Path(__file__).resolve().parent / "configs"
+        for artery in ("lca", "rca"):
+            config = json.loads(
+                (
+                    config_dir
+                    / f"eval_gcp_inaccurate_view_direction_{artery}_val_test.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(config["evaluation_mode"], "inaccurate_view_direction")
+            self.assertEqual(config["eval_split"], "val_test")
+            self.assertEqual(config["eval_num_views"], 2)
+            self.assertEqual(config["eval_view_indices"], [0, 1])
+            self.assertTrue(
+                config["view_direction_robustness"][
+                    "accurate_baseline_summary"
+                ].endswith("/performance_summary.json")
+            )
+
     def test_concrete_lca_and_rca_configs_are_self_contained_val_test_jobs(self):
         config_dir = Path(__file__).resolve().parent / "configs"
         expected = {
@@ -140,6 +160,36 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             [(1, [6]), (2, [6, 4]), (4, [6, 4, 2, 0])],
         )
 
+    def test_fixed_inaccurate_direction_options_are_validated(self):
+        options = resolve_evaluation_view_directions(
+            {
+                "evaluation_view_directions": {
+                    "accurate": False,
+                    "theta_change_deg": 5,
+                    "phi_change_deg": -2.5,
+                }
+            }
+        )
+        self.assertEqual(
+            options,
+            {
+                "accurate": False,
+                "theta_change_deg": 5.0,
+                "phi_change_deg": -2.5,
+                "distribution": "fixed_per_selected_view",
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "require a non-zero"):
+            resolve_evaluation_view_directions(
+                {
+                    "evaluation_view_directions": {
+                        "accurate": False,
+                        "theta_change_deg": 0,
+                        "phi_change_deg": 0,
+                    }
+                }
+            )
+
     def test_resolves_checkpoint_and_training_dataset_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = self._fixture(Path(directory))
@@ -261,6 +311,34 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             self.assertEqual(stage2_args.view_indices, [3, 5])
             self.assertIn("--gcp-checkpoint", trainer_args)
 
+    def test_stage2_arguments_forward_fixed_direction_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resolved = resolve_evaluation_config(self._fixture(root))
+            resolved["evaluation_view_directions"] = {
+                "accurate": False,
+                "theta_change_deg": 5.0,
+                "phi_change_deg": -2.0,
+                "distribution": "fixed_per_selected_view",
+            }
+            arguments = build_stage2_arguments(
+                resolved,
+                run_output_dir=root / "run",
+                view_indices=[3, 5],
+            )
+            self.assertEqual(
+                arguments[
+                    arguments.index("--view-direction-theta-change-deg") + 1
+                ],
+                "5.0",
+            )
+            self.assertEqual(
+                arguments[
+                    arguments.index("--view-direction-phi-change-deg") + 1
+                ],
+                "-2.0",
+            )
+
     def test_all_unselected_novel_views_preserves_trainer_default(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -293,6 +371,40 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             self.assertTrue(
                 all("--init-method" in run["stage2_arguments"] for run in plan["runs"])
             )
+
+    def test_inaccurate_mode_dry_run_writes_two_view_condition_configs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = self._fixture(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["evaluation_mode"] = "inaccurate_view_direction"
+            config["eval_num_views"] = 2
+            config["eval_view_indices"] = [3, 5]
+            config["view_direction_robustness"] = {
+                "changes_deg": [[-5, 0], [5, 0]],
+                "visualization_conditions_deg": [],
+                "require_accurate_baseline": True,
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--config", str(config_path), "--dry-run"]), 0)
+
+            output = root / "evaluation"
+            summary = json.loads(
+                (output / "view_direction_robustness_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(summary["status"], "planned")
+            self.assertEqual(summary["eval_num_views"], 2)
+            self.assertEqual(summary["eval_view_indices"], [3, 5])
+            self.assertEqual(len(summary["condition_runs"]), 2)
+            for child_path in (output / "run_configs").glob("*.json"):
+                child = json.loads(child_path.read_text(encoding="utf-8"))
+                self.assertEqual(child["eval_num_views"], 2)
+                self.assertEqual(child["eval_view_indices"], [3, 5])
+                self.assertFalse(child["evaluation_view_directions"]["accurate"])
 
     def test_paper_mode_combines_each_view_count_into_parametric_style_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
