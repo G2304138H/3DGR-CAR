@@ -47,7 +47,8 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                     "dropout": 0.0,
                 },
             )
-            self.assertEqual(config["eval_num_views"], [1, 2])
+            self.assertEqual(config["eval_num_views"], [1, 2, 4])
+            self.assertEqual(config["eval_view_indices"], [0, 1, 2, 3])
             self.assertTrue(config["continue_on_error"])
             optimization = config["gaussian_optimization"]
             self.assertEqual(
@@ -175,6 +176,26 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             self.assertEqual(resolved["eval_case_ids"], ["lca_0042"])
             self.assertEqual(resolved["eval_split"], "test")
 
+    def test_four_view_cli_override_builds_only_k4(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._fixture(Path(directory))
+            resolved = resolve_evaluation_config(
+                config_path,
+                eval_num_views_override=[4],
+                eval_view_indices_override=[0, 1, 2, 3],
+            )
+            self.assertEqual(resolved["eval_num_views"], [4])
+            self.assertEqual(resolved["eval_view_indices"], [0, 1, 2, 3])
+            self.assertEqual(
+                resolved["effective_view_sweep"],
+                [
+                    {
+                        "eval_num_views": 4,
+                        "view_indices": [0, 1, 2, 3],
+                    }
+                ],
+            )
+
     def test_case_number_cli_alias_is_repeatable(self):
         args = parse_args(
             [
@@ -186,10 +207,19 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                 "lca_0043",
                 "--split",
                 "val",
+                "--num-views",
+                "4",
+                "--view-indices",
+                "0",
+                "1",
+                "2",
+                "3",
             ]
         )
         self.assertEqual(args.case_ids, ["42", "lca_0043"])
         self.assertEqual(args.split, "val")
+        self.assertEqual(args.eval_num_views, [4])
+        self.assertEqual(args.view_indices, [0, 1, 2, 3])
 
     def test_stage2_arguments_force_gcp_and_keep_all_optimization_views(self):
         with tempfile.TemporaryDirectory() as directory:

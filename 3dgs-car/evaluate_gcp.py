@@ -355,6 +355,8 @@ def resolve_evaluation_config(
     output_dir_override: Optional[str] = None,
     eval_case_ids_override: Optional[Sequence[str]] = None,
     eval_split_override: Optional[str] = None,
+    eval_num_views_override: Optional[Sequence[int]] = None,
+    eval_view_indices_override: Optional[Sequence[int]] = None,
 ) -> Dict[str, Any]:
     """Load and fully resolve one JSON evaluation configuration."""
 
@@ -547,7 +549,12 @@ def resolve_evaluation_config(
             "This evaluator currently supports eval_view_selection='fixed'; "
             "set eval_view_indices to choose the fixed order."
         )
-    view_sweep = resolve_view_sweep(config)
+    view_config = dict(config)
+    if eval_num_views_override is not None:
+        view_config["eval_num_views"] = list(eval_num_views_override)
+    if eval_view_indices_override is not None:
+        view_config["eval_view_indices"] = list(eval_view_indices_override)
+    view_sweep = resolve_view_sweep(view_config)
 
     prediction_threshold = config.get("paper_metric_volume_threshold")
     if prediction_threshold is None:
@@ -643,6 +650,8 @@ def resolve_evaluation_config(
         "eval_split": eval_split,
         "eval_case_ids": eval_case_ids,
         "num_eval_cases": config.get("num_eval_cases", "all"),
+        "eval_num_views": view_config.get("eval_num_views"),
+        "eval_view_indices": view_config.get("eval_view_indices"),
         "eval_view_selection": "fixed",
         "eval_view_selection_seed": int(
             config.get("eval_view_selection_seed", 42)
@@ -1179,6 +1188,28 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Optional eval_split override.",
     )
     parser.add_argument(
+        "--num-views",
+        "--eval-num-views",
+        nargs="+",
+        type=int,
+        dest="eval_num_views",
+        default=None,
+        help=(
+            "Override eval_num_views. For a four-view-only run, pass "
+            "--num-views 4."
+        ),
+    )
+    parser.add_argument(
+        "--view-indices",
+        nargs="+",
+        type=int,
+        default=None,
+        help=(
+            "Override the fixed view order, for example "
+            "--view-indices 0 1 2 3."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Resolve and write the evaluation plan without running CUDA work.",
@@ -1194,6 +1225,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_dir_override=args.output_dir,
         eval_case_ids_override=args.case_ids,
         eval_split_override=args.split,
+        eval_num_views_override=args.eval_num_views,
+        eval_view_indices_override=args.view_indices,
     )
     output_dir = Path(str(resolved["eval_output_dir"]))
     output_dir.mkdir(parents=True, exist_ok=True)

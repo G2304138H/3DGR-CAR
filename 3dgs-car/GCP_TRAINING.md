@@ -265,11 +265,12 @@ reconstructed volume and GIF, input/novel reprojections, and run metadata.
 `max_visualizations` limits full artifact generation without reducing the set
 of cases that receive optimization and metrics.
 
-`eval_num_views` may be one integer or a list such as `[1, 2]`.
+`eval_num_views` may be one integer or a list such as `[1, 2, 4]`.
 `eval_view_indices` defines the fixed order, and each view-count run uses its
-prefix: with `[3, 5]`, the one-view run uses `[3]` and the two-view run uses
-`[3, 5]`. Only the first selected view enters the monocular GCP; all selected
-views constrain the subsequent Gaussian optimization.
+prefix: with `[0, 1, 2, 3]`, the one-view run uses `[0]`, the two-view run uses
+`[0, 1]`, and the four-view run uses `[0, 1, 2, 3]`. Only the first selected
+view enters the monocular GCP; all selected views constrain the subsequent
+Gaussian optimization.
 
 ### Run the LCA and RCA validation-plus-test evaluations with Python
 
@@ -279,12 +280,13 @@ separately trained predictor:
 - `configs/eval_gcp_paper_metric_lca_val_test.json`
 - `configs/eval_gcp_paper_metric_rca_val_test.json`
 
-Each file selects `best_gcp.pt`, evaluates every validation case followed by
-every test case through the combined `val_test` split, and stores the predictor
-architecture, paths, detector calibration, Gaussian optimizer parameters, and
-paper-metric settings. The architecture in the file is checked against the
-architecture saved in the checkpoint before inference. Stored NPZ calibration
-takes precedence over the configured fallback values.
+Each file selects `best_gcp.pt`, evaluates the one-, two-, and four-view
+conditions for every validation case followed by every test case through the
+combined `val_test` split, and stores the predictor architecture, paths,
+detector calibration, Gaussian optimizer parameters, and paper-metric settings.
+The architecture in the file is checked against the architecture saved in the
+checkpoint before inference. Stored NPZ calibration takes precedence over the
+configured fallback values.
 
 From the `3dgs-car` directory, run LCA with:
 
@@ -297,6 +299,23 @@ Run RCA with:
 ```console
 python -m evaluate_gcp --config configs/eval_gcp_paper_metric_rca_val_test.json
 ```
+
+Those commands evaluate the complete `[1, 2, 4]` sweep. To evaluate only the
+four-view condition without repeating the one- and two-view runs, use:
+
+```console
+python -m evaluate_gcp --config configs/eval_gcp_paper_metric_lca_val_test.json --num-views 4 --view-indices 0 1 2 3
+```
+
+or, for RCA:
+
+```console
+python -m evaluate_gcp --config configs/eval_gcp_paper_metric_rca_val_test.json --num-views 4 --view-indices 0 1 2 3
+```
+
+The four-view result is written below `metrics/by_view_count/k4`. The monocular
+GCP still uses view 0 to initialize Gaussian centers; views 0, 1, 2, and 3 all
+constrain the subsequent Gaussian primitive optimization.
 
 Add `--dry-run` to either command to resolve the paths and write the evaluation
 plan without running any Gaussian optimization.
