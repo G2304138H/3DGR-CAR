@@ -380,6 +380,7 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             config["evaluation_mode"] = "inaccurate_view_direction"
             config["eval_num_views"] = 2
             config["eval_view_indices"] = [3, 5]
+            config["gaussian_optimization"]["save_volume_gif"] = False
             config["view_direction_robustness"] = {
                 "changes_deg": [[-5, 0], [5, 0]],
                 "visualization_conditions_deg": [],
@@ -405,6 +406,12 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                 self.assertEqual(child["eval_num_views"], 2)
                 self.assertEqual(child["eval_view_indices"], [3, 5])
                 self.assertFalse(child["evaluation_view_directions"]["accurate"])
+                child_resolved = resolve_evaluation_config(child_path)
+                child_optimization = child_resolved["gaussian_optimization"]
+                self.assertNotIn("densify", child_optimization)
+                self.assertNotIn("save_volume_gif", child_optimization)
+                self.assertIn("no_densify", child_optimization)
+                self.assertIn("no_volume_gif", child_optimization)
 
     def test_paper_mode_combines_each_view_count_into_parametric_style_outputs(self):
         with tempfile.TemporaryDirectory() as directory:

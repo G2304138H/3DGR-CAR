@@ -593,6 +593,9 @@ def resolve_evaluation_config(
             raise ValueError("gaussian_optimization.densify must be boolean.")
         if "no_densify" in optimization:
             raise ValueError("Set only one of densify and no_densify.")
+        # Resolved configurations are reused as robustness child configs, so
+        # keep only the canonical trainer-facing flag and remain idempotent.
+        optimization.pop("densify")
         optimization["no_densify"] = not densify
     if "save_volume_gif" in optimization:
         save_gif = optimization["save_volume_gif"]
@@ -602,6 +605,7 @@ def resolve_evaluation_config(
             )
         if "no_volume_gif" in optimization:
             raise ValueError("Set only one of save_volume_gif and no_volume_gif.")
+        optimization.pop("save_volume_gif")
         optimization["no_volume_gif"] = not save_gif
 
     early_stop_checks = int(optimization.get("early_stop_checks", 7))
