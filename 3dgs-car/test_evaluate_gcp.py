@@ -31,10 +31,12 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             self.assertEqual(config["eval_split"], "val_test")
             self.assertEqual(config["eval_num_views"], 2)
             self.assertEqual(config["eval_view_indices"], [0, 1])
+            baseline = config["view_direction_robustness"][
+                "accurate_baseline_summary"
+            ]
             self.assertTrue(
-                config["view_direction_robustness"][
-                    "accurate_baseline_summary"
-                ].endswith("/performance_summary.json")
+                baseline.endswith("/performance_summary.json")
+                or baseline.endswith("/metrics/by_view_count/k2")
             )
 
     def test_concrete_lca_and_rca_configs_are_self_contained_val_test_jobs(self):

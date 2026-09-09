@@ -191,10 +191,61 @@ def _baseline_path(
     path = Path(str(raw)).expanduser()
     if not path.is_absolute():
         path = config_path.parent / path
-    return path.resolve()
+    path = path.resolve()
+    if path.is_dir():
+        candidates = (
+            path / "performance_summary.json",
+            path / "evaluation_results_k2.json",
+            path / "evaluation_results.json",
+        )
+        selected = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if selected is None:
+            raise FileNotFoundError(
+                "Baseline directory contains none of performance_summary.json, "
+                "evaluation_results_k2.json, or evaluation_results.json: "
+                f"{path}"
+            )
+        return selected
+    return path
+
+
+def _is_stage2_evaluation_results(performance: Mapping[str, Any]) -> bool:
+    return performance.get("format") == "3dgr_car_stage2_evaluation_v2"
+
+
+def _stage2_configuration(performance: Mapping[str, Any]) -> Mapping[str, Any]:
+    configuration = performance.get("configuration")
+    if not isinstance(configuration, Mapping):
+        raise ValueError(
+            "Stage-2 evaluation baseline has no configuration object."
+        )
+    return configuration
+
+
+def _trainer_argument_value(
+    arguments: object,
+    flag: str,
+) -> Optional[str]:
+    if not isinstance(arguments, list):
+        return None
+    for index, raw in enumerate(arguments):
+        value = str(raw)
+        if value == flag:
+            if index + 1 >= len(arguments):
+                raise ValueError(f"Baseline training_args ends after {flag}.")
+            return str(arguments[index + 1])
+        prefix = f"{flag}="
+        if value.startswith(prefix):
+            return value[len(prefix) :]
+    return None
 
 
 def _selected_summary(performance: Mapping[str, Any]) -> Dict[str, Any]:
+    if _is_stage2_evaluation_results(performance):
+        summary = performance.get("summary")
+        if not isinstance(summary, Mapping):
+            raise ValueError("Stage-2 evaluation baseline has no summary object.")
+        return dict(summary)
     roles = performance.get("roles_by_view_count")
     if not isinstance(roles, Mapping):
         raise ValueError("Performance summary has no roles_by_view_count object.")
@@ -219,6 +270,13 @@ def _metric_means(summary: Mapping[str, Any]) -> Dict[str, float]:
 
 
 def _selected_view_indices(performance: Mapping[str, Any]) -> list[int]:
+    if _is_stage2_evaluation_results(performance):
+        raw = _stage2_configuration(performance).get("view_indices")
+        if not isinstance(raw, list) or len(raw) != 2:
+            raise ValueError(
+                "Stage-2 evaluation baseline is not a two-view result."
+            )
+        return [int(index) for index in raw]
     condition = performance.get("comparison_condition")
     if not isinstance(condition, Mapping):
         raise ValueError("Performance summary lacks comparison_condition.")
@@ -234,6 +292,20 @@ def _selected_view_indices(performance: Mapping[str, Any]) -> list[int]:
 
 
 def _case_keys(summary_path: Path, performance: Mapping[str, Any]) -> list[Tuple[str, str]]:
+    if _is_stage2_evaluation_results(performance):
+        value = performance.get("cases")
+        if not isinstance(value, list):
+            raise ValueError(
+                f"Stage-2 baseline cases must be a JSON list: {summary_path}"
+            )
+        selected = [item for item in value if isinstance(item, Mapping)]
+        return [
+            (
+                str(item.get("case_name", item.get("case_id"))),
+                str(item.get("split")),
+            )
+            for item in selected
+        ]
     raw = performance.get("per_case_metrics_file")
     if not raw:
         raise ValueError("Performance summary does not identify per-case metrics.")
@@ -262,6 +334,40 @@ def _validate_baseline(
     split: str,
     view_indices: Sequence[int],
 ) -> None:
+    if _is_stage2_evaluation_results(performance):
+        configuration = _stage2_configuration(performance)
+        training_args = configuration.get("training_args")
+        recorded_checkpoint = _trainer_argument_value(
+            training_args, "--gcp-checkpoint"
+        )
+        if recorded_checkpoint is None:
+            raise ValueError(
+                "Stage-2 baseline training_args does not record --gcp-checkpoint."
+            )
+        if Path(recorded_checkpoint).expanduser().resolve() != checkpoint_path:
+            raise ValueError(
+                "Baseline checkpoint differs from robustness checkpoint: "
+                f"{recorded_checkpoint} != {checkpoint_path}."
+            )
+        recorded_split = configuration.get(
+            "split", performance.get("summary", {}).get("split")
+        )
+        if str(recorded_split) != str(split):
+            raise ValueError("Baseline and robustness evaluation splits differ.")
+        if _selected_view_indices(performance) != [
+            int(index) for index in view_indices
+        ]:
+            raise ValueError("Baseline and robustness two-view selections differ.")
+        theta_change = _trainer_argument_value(
+            training_args, "--view-direction-theta-change-deg"
+        )
+        phi_change = _trainer_argument_value(
+            training_args, "--view-direction-phi-change-deg"
+        )
+        if float(theta_change or 0.0) != 0.0 or float(phi_change or 0.0) != 0.0:
+            raise ValueError(f"Baseline is not an accurate-view run: {path}")
+        return
+
     condition = performance.get("comparison_condition")
     if not isinstance(condition, Mapping):
         raise ValueError(f"Accurate baseline lacks comparison_condition: {path}")

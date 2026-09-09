@@ -71,7 +71,7 @@
       [10.0, -10.0],
       [10.0, 10.0]
     ],
-    "accurate_baseline_summary": "/export/home2/reny0012/result/3dgr_car_gcp/rca/evaluation_paper_metric/val_test_best_gcp/performance_summary.json",
+    "accurate_baseline_summary": "/export/home2/reny0012/result/3dgr_car_gcp/rca/evaluation_paper_metric/val_test_best_gcp/metrics/by_view_count/k2",
     "require_accurate_baseline": true,
     "save_mask_npz_files": false
   },

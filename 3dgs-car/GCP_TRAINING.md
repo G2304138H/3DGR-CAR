@@ -381,6 +381,15 @@ Each per-case record also retains the stored angle, applied change, and
 evaluated angle for both input views under `evaluation_view_directions`, even
 when compact case caches are removed.
 
+`accurate_baseline_summary` may point to the combined
+`performance_summary.json`, directly to a two-view
+`evaluation_results.json`/`evaluation_results_k2.json`, or to the directory
+containing one of those files. This supports retained low-level `k2` results
+even when the combined root summary was later replaced by a single-view-count
+evaluation. The loader still validates the GCP checkpoint, `val_test` split,
+view order, accurate direction flags, and ordered case list before comparing
+conditions.
+
 ### Visualize one selected LCA or RCA case
 
 `visualize_gcp_case.py` provides the single-case equivalent of the parametric

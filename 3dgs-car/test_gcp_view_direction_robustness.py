@@ -42,6 +42,85 @@ class RobustnessPlanTests(unittest.TestCase):
             resolve_robustness_plan(
                 {"view_direction_robustness": {"changes_deg": [[0, 0]]}}
             )
+
+    def test_stage2_k2_json_or_its_directory_can_be_the_accurate_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "best_gcp.pt"
+            checkpoint.write_bytes(b"checkpoint")
+            baseline_dir = root / "k2"
+            baseline_dir.mkdir()
+            baseline_path = baseline_dir / "evaluation_results_k2.json"
+            baseline_path.write_text(
+                json.dumps(
+                    {
+                        "format": "3dgr_car_stage2_evaluation_v2",
+                        "configuration": {
+                            "split": "val_test",
+                            "view_indices": [0, 1],
+                            "training_args": [
+                                "--init-method",
+                                "gcp",
+                                "--gcp-checkpoint",
+                                str(checkpoint),
+                            ],
+                        },
+                        "summary": {
+                            "split": "val_test",
+                            "num_cases_completed": 1,
+                            "metrics": {
+                                "masked_dice_3d": {
+                                    "mean": 0.75,
+                                    "standard_error": None,
+                                }
+                            },
+                            "timing": {"average_case_seconds": 12.0},
+                        },
+                        "cases": [
+                            {
+                                "case_name": "rca_0001",
+                                "split": "validation",
+                                "status": "completed",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "robustness"
+            resolved = {
+                "eval_output_dir": str(output),
+                "checkpoint_path": str(checkpoint),
+                "checkpoint_choice": "best",
+                "experiment_dir": str(root),
+                "eval_split": "val_test",
+                "effective_view_sweep": [
+                    {"eval_num_views": 2, "view_indices": [0, 1]}
+                ],
+                "view_direction_robustness": {
+                    "changes_deg": [[2, 0]],
+                    "visualization_conditions_deg": [],
+                    "accurate_baseline_summary": str(baseline_dir),
+                },
+            }
+            config_path = root / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+
+            summary_path = run_view_direction_robustness(
+                resolved=resolved,
+                config_path=config_path,
+                evaluator_path=root / "evaluate_gcp.py",
+                dry_run=True,
+            )
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                summary["accurate_baseline_summary"], str(baseline_path.resolve())
+            )
+            self.assertEqual(summary["accurate_baseline"]["case_count"], 1)
+            self.assertEqual(
+                summary["accurate_baseline"]["metrics"]["masked_dice_3d"],
+                0.75,
+            )
         with self.assertRaisesRegex(ValueError, "must occur"):
             resolve_robustness_plan(
                 {
