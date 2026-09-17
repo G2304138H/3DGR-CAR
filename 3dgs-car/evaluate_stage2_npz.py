@@ -29,6 +29,7 @@ from volume_gif import (
     DEFAULT_VOLUME_GIF_POSITIVE_PERCENTILE,
     resolve_volume_isovalue,
 )
+from stage2_translation_projection import create_translated_stage2_case
 
 
 VOLUME_KEY_CANDIDATES = (
@@ -1095,6 +1096,36 @@ def summarise_metrics(
     return summary
 
 
+def summarise_gcp_roles(
+    records: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    """Summarize the GCP initialization and its optimization effect."""
+
+    completed = [record for record in records if record.get("status") == "completed"]
+    if not completed or not all(
+        all(f"gcp_initial_{name}" in record for name in METRIC_NAMES)
+        for record in completed
+    ):
+        return None
+    roles: Dict[str, object] = {}
+    for role, prefix in (
+        ("gcp_initialization", "gcp_initial_"),
+        ("optimized_minus_gcp_initialization", "optimized_minus_gcp_initial_"),
+    ):
+        roles[role] = {
+            "metrics": {
+                name: finite_descriptive_statistics(
+                    np.asarray(
+                        [float(record[f"{prefix}{name}"]) for record in completed],
+                        dtype=np.float64,
+                    )
+                )
+                for name in METRIC_NAMES
+            }
+        }
+    return roles
+
+
 def summarise_timings(
     records: Sequence[Mapping[str, object]],
     num_cases_requested: int,
@@ -1157,6 +1188,12 @@ def write_aggregate_reports(
     requested = len(records) if num_cases_requested is None else int(num_cases_requested)
     summary = summarise_metrics(records, split, requested)
     summary["timing"] = summarise_timings(records, requested)
+    gcp_roles = summarise_gcp_roles(records)
+    if gcp_roles is not None:
+        summary["roles"] = {
+            "optimized": {"metrics": summary["metrics"]},
+            **gcp_roles,
+        }
     if output_mode == "json-only":
         completed = [
             record for record in records if record.get("status") == "completed"
@@ -1564,6 +1601,47 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
             "before each case optimization stops (default: 7)."
         ),
     )
+    parser.add_argument(
+        "--view2-translation-mm",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("DX", "DY", "DZ"),
+        help=(
+            "Fixed XYZ artery translation in millimetres applied only when "
+            "re-rendering the second selected input view. Camera angles and "
+            "the first input image remain unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--translation-renderer-num-circle-points",
+        type=int,
+        default=120,
+        help="Tube circumference samples used for the view-2 re-render (default: 120).",
+    )
+    parser.add_argument(
+        "--translation-clean-rerender-min-dice",
+        type=float,
+        default=0.98,
+        help=(
+            "Required Dice between the stored view 2 and its zero-translation "
+            "re-render before a translated case is evaluated (default: 0.98)."
+        ),
+    )
+    parser.add_argument(
+        "--translation-visibility-warning-threshold",
+        type=float,
+        default=0.95,
+        help=(
+            "Flag translated cases whose visible centreline fraction is below "
+            "this value (default: 0.95)."
+        ),
+    )
+    parser.add_argument(
+        "--translation-fail-below-visibility-threshold",
+        action="store_true",
+        help="Reject rather than only flag a translated case below the visibility threshold.",
+    )
     args, training_args = parser.parse_known_args(argv)
     forbidden = {"--input", "--output-dir"}
     conflicting = sorted(forbidden.intersection(training_args))
@@ -1585,6 +1663,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         parser.error(
             "--early-stop-checks must be positive; split evaluation requires "
             "early stopping for every optimized case."
+        )
+    if args.view2_translation_mm is not None:
+        if len(args.view_indices) != 2 or len(set(args.view_indices)) != 2:
+            parser.error(
+                "--view2-translation-mm requires exactly two distinct --view-indices."
+            )
+        if not np.isfinite(np.asarray(args.view2_translation_mm, dtype=np.float64)).all():
+            parser.error("--view2-translation-mm values must be finite.")
+        if args.skip_reconstruction:
+            parser.error(
+                "--view2-translation-mm cannot be combined with --skip-reconstruction."
+            )
+    if args.translation_renderer_num_circle_points < 8:
+        parser.error("--translation-renderer-num-circle-points must be at least 8.")
+    if not 0.0 <= args.translation_clean_rerender_min_dice <= 1.0:
+        parser.error("--translation-clean-rerender-min-dice must be in [0,1].")
+    if not 0.0 <= args.translation_visibility_warning_threshold <= 1.0:
+        parser.error(
+            "--translation-visibility-warning-threshold must be in [0,1]."
         )
     if args.prediction_threshold is None and args.prediction_threshold_percentile is None:
         args.prediction_threshold_percentile = float(
@@ -1608,6 +1705,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         str(int(args.early_stop_checks)),
         "--record-optimization-time",
     ]
+    init_method = None
+    if "--init-method" in training_args:
+        init_position = training_args.index("--init-method")
+        if init_position + 1 < len(training_args):
+            init_method = str(training_args[init_position + 1]).strip().lower()
+    if init_method == "gcp":
+        effective_training_args.append("--save-initial-volume-for-evaluation")
     if args.prediction_threshold is not None:
         effective_training_args.extend(
             ("--prediction-threshold", str(float(args.prediction_threshold)))
@@ -1736,6 +1840,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     f"existing cache: {case_output_dir}. Use a fresh output directory, "
                     "--reuse-existing, or --keep-case-cache."
                 )
+            effective_projection_path = projection_path
+            if args.view2_translation_mm is not None:
+                effective_projection_path = (
+                    case_output_dir / "translated_calibration_input.npz"
+                )
+                translation_metadata = create_translated_stage2_case(
+                    projection_path,
+                    effective_projection_path,
+                    selected_view_indices=args.view_indices,
+                    translation_xyz_mm=args.view2_translation_mm,
+                    num_circle_points=args.translation_renderer_num_circle_points,
+                    clean_rerender_min_dice=(
+                        args.translation_clean_rerender_min_dice
+                    ),
+                    visibility_warning_threshold=(
+                        args.translation_visibility_warning_threshold
+                    ),
+                    fail_below_visibility_threshold=(
+                        args.translation_fail_below_visibility_threshold
+                    ),
+                )
+                record.update(translation_metadata)
+                record["original_projection_npz"] = str(projection_path)
+                record["effective_projection_npz"] = str(
+                    effective_projection_path
+                )
             create_visualization_artifacts = bool(
                 args.output_mode == "full"
                 and (
@@ -1754,7 +1884,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 reconstruction_timer_start = time.perf_counter()
                 run_reconstruction(
                     training_script,
-                    projection_path,
+                    effective_projection_path,
                     case_output_dir,
                     case_training_args,
                 )
@@ -1775,6 +1905,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             prediction = _squeeze_volume(
                 np.load(reconstruction_path, allow_pickle=False),
                 str(reconstruction_path),
+            )
+            initial_gcp_path = case_output_dir / "initial_gcp_volume_zyx.npy"
+            initial_gcp_prediction = (
+                _squeeze_volume(
+                    np.load(initial_gcp_path, allow_pickle=False),
+                    str(initial_gcp_path),
+                )
+                if initial_gcp_path.is_file()
+                else None
+            )
+            record["gcp_initial_volume"] = (
+                str(initial_gcp_path)
+                if initial_gcp_prediction is not None
+                else None
             )
             prediction_shape_before_alignment = tuple(prediction.shape)
             offset_xyz_m, offset_found = load_projection_center_offset_m(
@@ -1899,6 +2043,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     applied_shift_zyx_voxels,
                     interpolation=args.offset_interpolation,
                 )
+                if initial_gcp_prediction is not None:
+                    initial_gcp_prediction = translate_volume_zyx(
+                        initial_gcp_prediction,
+                        applied_shift_zyx_voxels,
+                        interpolation=args.offset_interpolation,
+                    )
                 print(
                     "  Reversed projection centering: "
                     f"offset_xyz_m={offset_xyz_m.tolist()} -> "
@@ -1935,6 +2085,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 dtype=np.float64,
             )
             record.update(metrics)
+            if initial_gcp_prediction is not None:
+                initial_metrics, _ = compute_volume_metrics(
+                    initial_gcp_prediction,
+                    ground_truth,
+                    prediction_threshold=(
+                        0.0
+                        if args.prediction_threshold is None
+                        else args.prediction_threshold
+                    ),
+                    ground_truth_threshold=args.ground_truth_threshold,
+                    normalisation=args.normalisation,
+                    metric_mask=args.metric_mask,
+                    roi_mask=roi_mask,
+                    ssim_window_size=args.ssim_window_size,
+                    prediction_threshold_percentile=(
+                        args.prediction_threshold_percentile
+                    ),
+                )
+                for metric_name in METRIC_NAMES:
+                    initial_value = float(initial_metrics[metric_name])
+                    optimized_value = float(metrics[metric_name])
+                    record[f"gcp_initial_{metric_name}"] = initial_value
+                    record[
+                        f"optimized_minus_gcp_initial_{metric_name}"
+                    ] = optimized_value - initial_value
+                for key, value in initial_metrics.items():
+                    if key not in METRIC_NAMES:
+                        record[f"gcp_initial_{key}"] = value
             record.update(
                 {
                     "status": "completed",

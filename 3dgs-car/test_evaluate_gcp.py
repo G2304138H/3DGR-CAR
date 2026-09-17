@@ -341,6 +341,27 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                 "-2.0",
             )
 
+    def test_stage2_arguments_forward_view2_translation_without_angle_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resolved = resolve_evaluation_config(self._fixture(root))
+            resolved["view2_translation_mm"] = [0.0, 10.0, 0.0]
+            resolved["translation_renderer_num_circle_points"] = 120
+            resolved["translation_clean_rerender_min_dice"] = 0.98
+            arguments = build_stage2_arguments(
+                resolved,
+                run_output_dir=root / "run",
+                view_indices=[3, 5],
+            )
+            position = arguments.index("--view2-translation-mm")
+            self.assertEqual(
+                arguments[position + 1 : position + 4],
+                ["0.0", "10.0", "0.0"],
+            )
+            self.assertNotIn("--view-direction-theta-change-deg", arguments)
+            stage2_args, _ = parse_stage2_args(arguments)
+            self.assertEqual(stage2_args.view2_translation_mm, [0.0, 10.0, 0.0])
+
     def test_all_unselected_novel_views_preserves_trainer_default(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -414,6 +435,52 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                 self.assertNotIn("save_volume_gif", child_optimization)
                 self.assertIn("no_densify", child_optimization)
                 self.assertIn("no_volume_gif", child_optimization)
+
+    def test_translation_mode_dry_run_writes_nine_fixed_zero_angle_configs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = self._fixture(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["evaluation_mode"] = "translational_calibration_robustness"
+            config["eval_num_views"] = 2
+            config["eval_view_indices"] = [3, 5]
+            config["gaussian_optimization"]["save_volume_gif"] = False
+            config["translational_calibration_robustness"] = {
+                "require_accurate_baseline": True,
+                "clean_rerender_min_dice": 0.98,
+                "renderer_num_circle_points": 120,
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--config", str(config_path), "--dry-run"]), 0)
+
+            output = root / "evaluation"
+            summary = json.loads(
+                (
+                    output / "translation_calibration_robustness_summary.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(summary["status"], "planned")
+            self.assertEqual(summary["eval_view_indices"], [3, 5])
+            self.assertEqual(len(summary["condition_runs"]), 9)
+            self.assertFalse(summary["camera_angle_perturbation"]["applied"])
+            for child_path in (output / "run_configs").glob("*.json"):
+                child = json.loads(child_path.read_text(encoding="utf-8"))
+                self.assertEqual(child["evaluation_mode"], "paper_metric")
+                self.assertEqual(child["eval_view_indices"], [3, 5])
+                self.assertTrue(child["evaluation_view_directions"]["accurate"])
+                self.assertEqual(child["evaluation_view_directions"]["theta_change_deg"], 0.0)
+                self.assertEqual(child["evaluation_view_directions"]["phi_change_deg"], 0.0)
+                self.assertEqual(len(child["view2_translation_mm"]), 3)
+                child_resolved = resolve_evaluation_config(child_path)
+                arguments = build_stage2_arguments(
+                    child_resolved,
+                    run_output_dir=root / "child_run",
+                    view_indices=[3, 5],
+                )
+                self.assertIn("--view2-translation-mm", arguments)
+                self.assertNotIn("--view-direction-theta-change-deg", arguments)
 
     def test_paper_mode_combines_each_view_count_into_parametric_style_outputs(self):
         with tempfile.TemporaryDirectory() as directory:

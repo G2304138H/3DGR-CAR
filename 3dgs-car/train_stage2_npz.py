@@ -965,6 +965,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
             "montage, novel-view, and GIF artifacts."
         ),
     )
+    parser.add_argument(
+        "--save-initial-volume-for-evaluation",
+        action="store_true",
+        help=(
+            "Keep initial_gcp_volume_zyx.npy in the temporary evaluation cache "
+            "so the evaluator can report GCP-initialization metrics."
+        ),
+    )
     parser.add_argument("--gpu-index", type=int, default=0)
     args = parser.parse_args(argv)
     if args.expected_gcp_model_config_json is not None:
@@ -1155,7 +1163,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             initial_volume = gaussians.grid_sample(
                 grid, expand=[5, 15, 15]
             ).squeeze(-1)
-        if not args.evaluation_cache_only:
+        if not args.evaluation_cache_only or args.save_initial_volume_for_evaluation:
             np.save(
                 output_dir / "initial_gcp_volume_zyx.npy",
                 initial_volume[0].detach().cpu().numpy(),
@@ -1513,6 +1521,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         "record_optimization_time": bool(args.record_optimization_time),
         "evaluation_cache_only": bool(args.evaluation_cache_only),
+        "save_initial_volume_for_evaluation": bool(
+            args.save_initial_volume_for_evaluation
+        ),
         "optimization_iterations_completed": int(
             optimization_iterations_completed
         ),

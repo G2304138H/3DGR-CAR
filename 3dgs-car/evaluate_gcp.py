@@ -148,16 +148,24 @@ def _normalise_evaluation_mode(raw: object) -> str:
         "inaccurate_view_directions": "inaccurate_view_direction",
         "view_direction_robustness": "inaccurate_view_direction",
         "view_directions_robustness": "inaccurate_view_direction",
+        "translation_robustness": "translational_calibration_robustness",
+        "translational_robustness": "translational_calibration_robustness",
+        "fixed_two_view_translational_calibration_robustness": (
+            "translational_calibration_robustness"
+        ),
+        "inaccurate_view_translation": "translational_calibration_robustness",
     }
     value = aliases.get(value, value)
     if value not in {
         "paper_metric",
         "visualisation",
         "inaccurate_view_direction",
+        "translational_calibration_robustness",
     }:
         raise ValueError(
-            "evaluation_mode must be 'paper_metric', 'visualisation', or "
-            "'inaccurate_view_direction', "
+            "evaluation_mode must be 'paper_metric', 'visualisation', "
+            "'inaccurate_view_direction', or "
+            "'translational_calibration_robustness', "
             f"got {raw!r}."
         )
     return value
@@ -524,11 +532,19 @@ def resolve_evaluation_config(
             else (
                 "evaluation_inaccurate_view_direction_robustness"
                 if mode == "inaccurate_view_direction"
-                else "evaluation"
+                else (
+                    "evaluation_translational_calibration_robustness"
+                    if mode == "translational_calibration_robustness"
+                    else "evaluation"
+                )
             )
         )
         if (
-            mode != "inaccurate_view_direction"
+            mode
+            not in {
+                "inaccurate_view_direction",
+                "translational_calibration_robustness",
+            }
             and not bool(view_direction_options["accurate"])
         ):
             def format_angle(value: float) -> str:
@@ -645,12 +661,23 @@ def resolve_evaluation_config(
     if eval_view_indices_override is not None:
         view_config["eval_view_indices"] = list(eval_view_indices_override)
     view_sweep = resolve_view_sweep(view_config)
-    if mode == "inaccurate_view_direction" and (
+    if mode in {
+        "inaccurate_view_direction",
+        "translational_calibration_robustness",
+    } and (
         len(view_sweep) != 1 or int(view_sweep[0][0]) != 2
     ):
         raise ValueError(
-            "inaccurate_view_direction evaluation requires exactly two input "
+            f"{mode} evaluation requires exactly two input "
             "views: set eval_num_views to 2 and provide two eval_view_indices."
+        )
+    if mode == "translational_calibration_robustness" and not bool(
+        view_direction_options["accurate"]
+    ):
+        raise ValueError(
+            "translational_calibration_robustness keeps all nominal camera "
+            "angles unchanged; evaluation_view_directions must be accurate "
+            "with zero theta/phi changes."
         )
 
     prediction_threshold = config.get("paper_metric_volume_threshold")
@@ -978,6 +1005,37 @@ def build_stage2_arguments(
             )
         )
 
+    translation = resolved.get("view2_translation_mm")
+    if translation is not None:
+        values = _three_values(
+            translation,
+            label="view2_translation_mm",
+            cast=float,
+        )
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("view2_translation_mm entries must be finite.")
+        arguments.extend(
+            ("--view2-translation-mm", *(str(float(value)) for value in values))
+        )
+        arguments.extend(
+            (
+                "--translation-renderer-num-circle-points",
+                str(int(resolved.get("translation_renderer_num_circle_points", 120))),
+                "--translation-clean-rerender-min-dice",
+                str(float(resolved.get("translation_clean_rerender_min_dice", 0.98))),
+                "--translation-visibility-warning-threshold",
+                str(
+                    float(
+                        resolved.get(
+                            "translation_visibility_warning_threshold", 0.95
+                        )
+                    )
+                ),
+            )
+        )
+        if bool(resolved.get("translation_fail_below_visibility_threshold", False)):
+            arguments.append("--translation-fail-below-visibility-threshold")
+
     arguments.extend(_trainer_arguments(resolved))
     return arguments
 
@@ -1128,6 +1186,15 @@ def _write_combined_outputs(
         "metrics_by_view_count": summaries,
         "timing": timing_summary,
     }
+    roles_by_view_count: Dict[str, Any] = {}
+    for label, summary in summaries.items():
+        roles: Dict[str, Any] = {"optimized": summary}
+        additional_roles = summary.get("roles")
+        if isinstance(additional_roles, Mapping):
+            for role, role_summary in additional_roles.items():
+                if role != "optimized" and isinstance(role_summary, Mapping):
+                    roles[str(role)] = dict(role_summary)
+        roles_by_view_count[label] = roles
     performance_summary = {
         "schema_version": 1,
         "comparison_condition": {
@@ -1147,12 +1214,13 @@ def _write_combined_outputs(
             "evaluation_view_directions": dict(
                 resolved["evaluation_view_directions"]
             ),
+            "view2_translation_mm": resolved.get("view2_translation_mm"),
+            "translation_angles_unchanged": (
+                True if resolved.get("view2_translation_mm") is not None else None
+            ),
         },
         "evaluation": evaluation_summary,
-        "roles_by_view_count": {
-            label: {"optimized": summary}
-            for label, summary in summaries.items()
-        },
+        "roles_by_view_count": roles_by_view_count,
         "per_case_metrics_file": "performance_per_case.json",
         "output_layout": {
             "visualization": (
@@ -1356,6 +1424,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from gcp_view_direction_robustness import run_view_direction_robustness
 
         aggregate_path = run_view_direction_robustness(
+            resolved=resolved,
+            config_path=Path(args.config).expanduser().resolve(),
+            evaluator_path=Path(__file__).resolve(),
+            dry_run=bool(args.dry_run),
+        )
+        action = "Saved robustness plan" if args.dry_run else "Saved robustness summary"
+        print(f"{action}: {aggregate_path}", flush=True)
+        return 0
+    if mode == "translational_calibration_robustness":
+        from gcp_translation_calibration_robustness import (
+            run_translation_calibration_robustness,
+        )
+
+        aggregate_path = run_translation_calibration_robustness(
             resolved=resolved,
             config_path=Path(args.config).expanduser().resolve(),
             evaluator_path=Path(__file__).resolve(),

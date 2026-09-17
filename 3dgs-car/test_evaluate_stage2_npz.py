@@ -23,6 +23,7 @@ from evaluate_stage2_npz import (
     select_case_references,
     structural_similarity_3d,
     summarise_metrics,
+    summarise_gcp_roles,
     summarise_timings,
     translate_volume_zyx,
 )
@@ -31,6 +32,26 @@ from stage2_npz_data import Stage2ProjectionCase, validate_view_indices
 
 
 class SplitLoadingTests(unittest.TestCase):
+    def test_gcp_role_summary_records_initial_and_optimization_effect(self):
+        record = {"status": "completed"}
+        from evaluate_stage2_npz import METRIC_NAMES
+
+        for index, name in enumerate(METRIC_NAMES, start=1):
+            record[name] = float(index)
+            record[f"gcp_initial_{name}"] = float(index) - 0.25
+            record[f"optimized_minus_gcp_initial_{name}"] = 0.25
+        roles = summarise_gcp_roles([record])
+        self.assertIsNotNone(roles)
+        self.assertEqual(
+            roles["gcp_initialization"]["metrics"]["masked_dice_3d"]["mean"],
+            0.75,
+        )
+        self.assertEqual(
+            roles["optimized_minus_gcp_initialization"]["metrics"]
+            ["masked_dice_3d"]["mean"],
+            0.25,
+        )
+
     def test_case_selection_preserves_requested_order_then_applies_limit(self):
         self.assertEqual(
             select_case_references(

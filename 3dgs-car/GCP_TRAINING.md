@@ -390,6 +390,68 @@ evaluation. The loader still validates the GCP checkpoint, `val_test` split,
 view order, accurate direction flags, and ordered case list before comparing
 conditions.
 
+### Fixed two-view translational calibration robustness evaluation
+
+This is a separate physical-translation test, not a camera-angle test. Run the
+accurate two-view paper-metric result first, then run LCA with:
+
+```console
+python -m evaluate_gcp --config configs/eval_gcp_translational_calibration_lca_val_test.json
+```
+
+or RCA with:
+
+```console
+python -m evaluate_gcp --config configs/eval_gcp_translational_calibration_rca_val_test.json
+```
+
+Both configurations use the same ordered pair `[0, 1]` for all cases and all
+conditions. View 0 remains the stored accurate image. For view 1, the embedded
+artery is first centred with its stored `projection_center_offset`, translated
+in metres, and re-rendered with the original theta, phi, SID, detector spacing,
+image size, projected branch subset, and mask settings. The nominal theta/phi
+arrays and view-direction features are never changed. The GCP recomputes image
+features from the replaced two-image input, then the ordinary per-case Gaussian
+optimization runs against the translated second image. The canonical target
+and the projection offset used by the paper-metric alignment remain unchanged.
+
+The nine conditions are fixed: positive Y, equal positive XZ, and equal
+positive XYZ translations at total Euclidean magnitudes 5, 10, and 20 mm.
+Thus XZ components are `d/sqrt(2)`, and XYZ components are `d/sqrt(3)`; `d` is
+not applied independently to every active axis. The vessel-code coordinates
+are +x patient left, +y patient anterior/away from the table, and +z patient
+superior/toward the head. The implementation moves the artery by `+delta_t`,
+which is equivalent to moving the source-detector system or isocentre by
+`-delta_t`. Because only positive directions are sampled, this is a
+fixed-positive-direction translational stress test, not direction-independent
+translation robustness.
+
+Before every translated reconstruction, the code re-renders view 1 with zero
+translation and requires Dice >= 0.98 against its stored image. A failure stops
+the condition and normally indicates inconsistent branch selection, centring,
+or renderer settings. There is no image-feature cache in this path: each child
+run receives a newly written NPZ and executes the GCP again.
+
+The output root contains:
+
+- `translation_calibration_robustness_summary.json`, with GCP-initialized,
+  optimized, and optimization-effect metric summaries, timing, re-projection
+  diagnostics, and changes from the accurate two-view baseline;
+- `translation_calibration_robustness_metrics.csv`, the flat condition/role
+  metric table for plotting and statistical analysis;
+- `translation_calibration_robustness_per_case.json` and `.csv`, containing the
+  exact translation vector, ordered view indices, unchanged nominal angles,
+  clean re-render Dice, visible centreline/surface fractions, view-2 foreground
+  ratios before and after translation, GCP-initialized and optimized paper
+  metrics, optimized-minus-initialization effects, timing, and per-case changes
+  from the accurate control;
+- `run_configs/<condition>.json`, the resolved child configurations;
+- `conditions/<family>_<magnitude>mm/`, the normal paper-metric output for each
+  of the nine conditions.
+
+Add `--dry-run` to either command to create and inspect the nine child
+configurations without starting CUDA work.
+
 ### Visualize one selected LCA or RCA case
 
 `visualize_gcp_case.py` provides the single-case equivalent of the parametric
