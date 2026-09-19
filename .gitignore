@@ -2,3 +2,7 @@
 3dgs-car/ToyData/
 3dgs-car/ToyData.zip
 3dgs-car/outputs/
+
+3dgs-car/__pycache__/*.pyc
+3dgs-car/utils/__pycache__/*.pyc
+*.sh
