@@ -732,6 +732,9 @@ def resolve_evaluation_config(
     paper_save_masks = config.get("paper_metric_save_masks", True)
     if not isinstance(paper_save_masks, bool):
         raise ValueError("paper_metric_save_masks must be boolean.")
+    save_prediction_npz_files = config.get("save_prediction_npz_files", False)
+    if not isinstance(save_prediction_npz_files, bool):
+        raise ValueError("save_prediction_npz_files must be boolean.")
     save_ssim_map = config.get("paper_metric_save_ssim_map", False)
     if not isinstance(save_ssim_map, bool):
         raise ValueError("paper_metric_save_ssim_map must be boolean.")
@@ -787,6 +790,7 @@ def resolve_evaluation_config(
         ],
         "max_visualizations": config.get("max_visualizations", "all"),
         "paper_metric_save_masks": paper_save_masks,
+        "save_prediction_npz_files": save_prediction_npz_files,
         "paper_metric_save_ssim_map": save_ssim_map,
         "paper_metric_prediction_threshold_percentile": prediction_percentile,
         "paper_metric_volume_threshold": prediction_threshold,
@@ -987,6 +991,8 @@ def build_stage2_arguments(
 
     if mode == "paper_metric" and bool(resolved["paper_metric_save_masks"]):
         arguments.append("--save-evaluation-arrays")
+    if bool(resolved["save_prediction_npz_files"]):
+        arguments.append("--save-prediction-npz")
     if bool(resolved["paper_metric_save_ssim_map"]):
         arguments.append("--save-ssim-map")
     if mode == "visualisation":
@@ -1102,6 +1108,7 @@ def _write_combined_outputs(
     records: List[Dict[str, Any]] = []
     summaries: Dict[str, Any] = {}
     mask_files: List[Dict[str, Any]] = []
+    prediction_files: List[Dict[str, Any]] = []
     for view_label, result in run_results.items():
         count = int(view_label[1:])
         summaries[view_label] = {
@@ -1133,6 +1140,18 @@ def _write_combined_outputs(
                         "eval_num_views": count,
                         "role": "optimized",
                         "path": str(artifact),
+                    }
+                )
+            prediction_artifact = record.get("prediction_npz")
+            if prediction_artifact is not None:
+                prediction_files.append(
+                    {
+                        "case_id": record.get("case_name"),
+                        "split": record.get("split"),
+                        "eval_num_views": count,
+                        "selected_view_indices": list(selected_indices),
+                        "role": "optimized",
+                        "path": str(prediction_artifact),
                     }
                 )
 
@@ -1245,6 +1264,13 @@ def _write_combined_outputs(
                 and resolved["paper_metric_save_masks"]
                 else None
             ),
+            "paper_metric_predictions": (
+                "metrics/by_view_count/<views>/predictions/"
+                "<case>_gaussian_prediction.npz"
+                if resolved["evaluation_mode"] == "paper_metric"
+                and resolved["save_prediction_npz_files"]
+                else None
+            ),
         },
     }
     stage2_evaluation.write_json(output_dir / "performance_per_case.json", records)
@@ -1299,6 +1325,9 @@ def _write_combined_outputs(
                 "projection_center_offset_reversal": resolved.get(
                     "projection_offset_mode", "auto"
                 ),
+                "save_prediction_npz": bool(
+                    resolved["save_prediction_npz_files"]
+                ),
             },
             "timing": timing_summary,
             "by_view_count": summaries,
@@ -1319,6 +1348,17 @@ def _write_combined_outputs(
                 "saved": bool(resolved["paper_metric_save_masks"]),
                 "num_files": len(mask_files),
                 "files": mask_files,
+            },
+        )
+        prediction_dir = metrics_dir / "predictions"
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        stage2_evaluation.write_json(
+            prediction_dir / "manifest.json",
+            {
+                "format": "compressed_npz",
+                "saved": bool(resolved["save_prediction_npz_files"]),
+                "num_files": len(prediction_files),
+                "files": prediction_files,
             },
         )
 

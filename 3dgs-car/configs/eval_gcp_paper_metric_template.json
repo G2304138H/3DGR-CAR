@@ -34,6 +34,7 @@
   "eval_view_selection": "fixed",
   "eval_view_selection_seed": 42,
   "max_visualizations": 0,
+  "save_prediction_npz_files": true,
 
   "paper_metric_ground_truth_dir": null,
   "paper_metric_save_masks": true,
