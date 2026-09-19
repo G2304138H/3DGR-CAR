@@ -87,6 +87,11 @@ class SplitLoadingTests(unittest.TestCase):
             def fake_reconstruction(_script, _projection, case_output, training_args):
                 received_training_args.extend(training_args)
                 np.save(case_output / "reconstructed_volume_zyx.npy", volume)
+                np.savez_compressed(
+                    case_output / "gaussians.npz",
+                    xyz_world_m=np.asarray([[0.1, 0.2, 0.3]], dtype=np.float32),
+                    density=np.asarray([[0.7]], dtype=np.float32),
+                )
                 (case_output / "optimization_timing.json").write_text(
                     json.dumps(
                         {
@@ -187,6 +192,7 @@ class SplitLoadingTests(unittest.TestCase):
                 str(arrays_output),
                 *argv[argv.index("--output-dir") + 2 :],
                 "--save-evaluation-arrays",
+                "--save-prediction-npz",
             ]
             with mock.patch(
                 "evaluate_stage2_npz.run_reconstruction",
@@ -200,7 +206,34 @@ class SplitLoadingTests(unittest.TestCase):
                     for path in arrays_output.rglob("*")
                     if path.is_file()
                 ),
-                ["evaluation_results.json", "voxel_masks/rca_0001.npz"],
+                [
+                    "evaluation_results.json",
+                    "predictions/rca_0001_gaussian_prediction.npz",
+                    "voxel_masks/rca_0001.npz",
+                ],
+            )
+            prediction_path = (
+                arrays_output
+                / "predictions"
+                / "rca_0001_gaussian_prediction.npz"
+            )
+            with np.load(prediction_path, allow_pickle=False) as prediction_npz:
+                np.testing.assert_allclose(
+                    prediction_npz["xyz_world_m"],
+                    [[0.1, 0.2, 0.3]],
+                )
+                np.testing.assert_allclose(
+                    prediction_npz["density"],
+                    [[0.7]],
+                )
+            saved_results = json.loads(
+                (arrays_output / "evaluation_results.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                Path(saved_results["cases"][0]["prediction_npz"]),
+                prediction_path.resolve(),
             )
 
     def test_split_evaluation_requires_positive_early_stopping_patience(self):

@@ -257,6 +257,14 @@ files at the root:
 - `metrics/paper_metric_summary.json`
 - `metrics/metrics_matrix.npz`
 - `metrics/voxel_masks/manifest.json`
+- `metrics/predictions/manifest.json`
+
+When `save_prediction_npz_files` is `true`, each view-count run also writes
+`metrics/by_view_count/k<N>/predictions/<case>_gaussian_prediction.npz`. This
+is the final optimized native 3DGR-CAR prediction: Gaussian XYZ coordinates,
+density, scale, rotation, selected views, evaluated camera geometry, and volume
+extent. These files are retained even when the temporary per-case optimization
+cache is removed. Rasterized volumes and masks remain in `voxel_masks/`.
 
 For `evaluation_mode: "visualisation"`, the same metrics are computed and the
 full per-case Stage-2 artifact bundle is retained under

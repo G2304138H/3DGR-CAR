@@ -36,6 +36,7 @@
   "eval_view_selection": "fixed",
   "eval_view_selection_seed": 42,
   "max_visualizations": 0,
+  "save_prediction_npz_files": true,
   "paper_metric_save_masks": true,
   "paper_metric_save_ssim_map": false,
   "paper_metric_ssim_window_size": 7,

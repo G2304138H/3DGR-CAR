@@ -1257,6 +1257,7 @@ def write_aggregate_reports(
         "projection_npz",
         "ground_truth_npz",
         "reconstruction_volume",
+        "prediction_npz",
         "evaluation_arrays",
         "prediction_threshold",
         "prediction_threshold_mode",
@@ -1552,6 +1553,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help=(
             "Persist each aligned prediction, ground truth, and binary mask even "
             "in json-only mode. Arrays are written under voxel_masks/."
+        ),
+    )
+    parser.add_argument(
+        "--save-prediction-npz",
+        action="store_true",
+        help=(
+            "Persist the final optimized Gaussian-primitives NPZ for every "
+            "completed case under predictions/, independently of temporary "
+            "case-cache cleanup."
         ),
     )
     parser.add_argument(
@@ -2170,6 +2180,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record["metrics_wall_time_seconds"] = float(
                 time.perf_counter() - metrics_timer_start
             )
+
+            if args.save_prediction_npz:
+                gaussian_prediction_path = case_output_dir / "gaussians.npz"
+                if not gaussian_prediction_path.is_file():
+                    raise FileNotFoundError(
+                        "Prediction export was requested, but the optimizer did "
+                        f"not produce {gaussian_prediction_path}."
+                    )
+                prediction_dir = output_dir / "predictions"
+                prediction_dir.mkdir(parents=True, exist_ok=True)
+                prediction_path = (
+                    prediction_dir
+                    / f"{projection_path.stem}_gaussian_prediction.npz"
+                )
+                shutil.copy2(gaussian_prediction_path, prediction_path)
+                record["prediction_npz"] = str(prediction_path)
 
             if args.output_mode == "full" or args.save_evaluation_arrays:
                 if args.output_mode == "full":

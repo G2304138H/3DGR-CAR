@@ -71,6 +71,7 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             )
             self.assertEqual(config["eval_num_views"], [1, 2, 4])
             self.assertEqual(config["eval_view_indices"], [0, 1, 2, 3])
+            self.assertTrue(config["save_prediction_npz_files"])
             self.assertTrue(config["continue_on_error"])
             optimization = config["gaussian_optimization"]
             self.assertEqual(
@@ -140,6 +141,7 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                     "paper_metric_ground_truth_dir": None,
                     "paper_metric_volume_threshold": None,
                     "paper_metric_prediction_threshold_percentile": 97,
+                    "save_prediction_npz_files": True,
                     "gaussian_optimization": {
                         "iterations": 12,
                         "early_stop_checks": 3,
@@ -298,6 +300,7 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                 resolved["model"]["parameters"],
             )
             self.assertIn("--save-evaluation-arrays", arguments)
+            self.assertIn("--save-prediction-npz", arguments)
             self.assertIn("--no-densify", arguments)
             self.assertEqual(arguments[arguments.index("--iterations") + 1], "12")
             self.assertEqual(
@@ -498,10 +501,18 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                     cursor += 1
                 count = len(view_values)
                 run_dir.mkdir(parents=True, exist_ok=True)
+                prediction_path = (
+                    run_dir
+                    / "predictions"
+                    / "lca_0001_gaussian_prediction.npz"
+                )
+                prediction_path.parent.mkdir(parents=True, exist_ok=True)
+                prediction_path.write_bytes(b"test prediction")
                 case = {
                     "case_name": "lca_0001",
                     "split": "val_test",
                     "status": "completed",
+                    "prediction_npz": str(prediction_path),
                     "case_wall_time_seconds": float(count * 10),
                     "reconstruction_wall_time_seconds": float(count * 8),
                     "optimization_elapsed_seconds": float(count * 6),
@@ -574,6 +585,18 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             )
             self.assertEqual(paper_summary["timing"], timing)
             self.assertTrue((output / "metrics" / "metrics_matrix.npz").is_file())
+            prediction_manifest = json.loads(
+                (
+                    output / "metrics" / "predictions" / "manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertTrue(prediction_manifest["saved"])
+            self.assertEqual(prediction_manifest["num_files"], 2)
+            self.assertEqual(
+                performance["output_layout"]["paper_metric_predictions"],
+                "metrics/by_view_count/<views>/predictions/"
+                "<case>_gaussian_prediction.npz",
+            )
 
 
 if __name__ == "__main__":
