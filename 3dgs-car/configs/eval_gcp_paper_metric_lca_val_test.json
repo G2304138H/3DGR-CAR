@@ -28,7 +28,7 @@
   "paper_metric_ground_truth_dir": "/dataset/reny0012/imagecas_voxel",
   "eval_output_dir": "/export/home2/reny0012/result/3dgr_car_gcp/lca/evaluation_paper_metric/val_test_best_gcp",
   "evaluation_mode": "paper_metric",
-  "eval_split": "val_test",
+  "eval_split": "test",
   "num_eval_cases": "all",
   "eval_case_ids": null,
   "eval_num_views": [1, 2, 4],
