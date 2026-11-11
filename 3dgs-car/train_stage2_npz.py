@@ -626,6 +626,7 @@ def export_gaussians(
     evaluated_phi_deg: np.ndarray,
     volume_extent_m: float,
     silhouette_gain: Optional[float],
+    save_checkpoint: bool = True,
 ) -> None:
     xyz_zyx = gaussians.get_xyz.detach().cpu()
     density = gaussians.get_density.detach().cpu()
@@ -665,7 +666,8 @@ def export_gaussians(
         ),
         "silhouette_gain": silhouette_gain,
     }
-    torch.save(checkpoint, output_dir / "gaussians.pt")
+    if save_checkpoint:
+        torch.save(checkpoint, output_dir / "gaussians.pt")
     np.savez_compressed(
         output_dir / "gaussians.npz",
         xyz_normalized_zyx=xyz_zyx.numpy(),
@@ -975,11 +977,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     )
     parser.add_argument("--no-volume-gif", action="store_true")
     parser.add_argument(
+        "--save-gaussian-npz", action="store_true",
+        help="Export gaussians.npz even in evaluation-cache-only mode.",
+    )
+    parser.add_argument(
         "--evaluation-cache-only",
         action="store_true",
         help=(
             "Write only reconstructed_volume_zyx.npy, timing JSON, and run metadata "
-            "for temporary split evaluation; skip NIfTI, Gaussian, reprojection, "
+            "for temporary split evaluation; skip NIfTI, Gaussian (unless "
+            "--save-gaussian-npz), reprojection, "
             "montage, novel-view, and GIF artifacts."
         ),
     )
@@ -1362,7 +1369,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         save_nifti=not args.evaluation_cache_only,
     )
     volume_gif_isovalue: Optional[float] = None
-    if not args.evaluation_cache_only:
+    if not args.evaluation_cache_only or args.save_gaussian_npz:
         export_gaussians(
             gaussians=gaussians,
             output_dir=output_dir,
@@ -1373,6 +1380,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             evaluated_phi_deg=evaluated_phi_deg,
             volume_extent_m=volume_extent_m,
             silhouette_gain=silhouette_gain,
+            save_checkpoint=not args.evaluation_cache_only,
         )
 
     if not args.evaluation_cache_only:
@@ -1584,6 +1592,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.evaluation_cache_only:
         print(f"Saved Gaussian checkpoint: {output_dir / 'gaussians.pt'}")
         print(f"Saved portable Gaussian arrays: {output_dir / 'gaussians.npz'}")
+    elif args.save_gaussian_npz:
+        print(f"Saved portable Gaussian arrays: {output_dir / 'gaussians.npz'}")
+        print("Evaluation cache-only mode: skipped checkpoint and visualization artifacts.")
     else:
         print("Evaluation cache-only mode: skipped persistent visualization/model artifacts.")
     print(f"Saved reconstructed volume under: {output_dir}")

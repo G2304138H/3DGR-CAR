@@ -87,11 +87,12 @@ class SplitLoadingTests(unittest.TestCase):
             def fake_reconstruction(_script, _projection, case_output, training_args):
                 received_training_args.extend(training_args)
                 np.save(case_output / "reconstructed_volume_zyx.npy", volume)
-                np.savez_compressed(
-                    case_output / "gaussians.npz",
-                    xyz_world_m=np.asarray([[0.1, 0.2, 0.3]], dtype=np.float32),
-                    density=np.asarray([[0.7]], dtype=np.float32),
-                )
+                if "--save-gaussian-npz" in training_args:
+                    np.savez_compressed(
+                        case_output / "gaussians.npz",
+                        xyz_world_m=np.asarray([[0.1, 0.2, 0.3]], dtype=np.float32),
+                        density=np.asarray([[0.7]], dtype=np.float32),
+                    )
                 (case_output / "optimization_timing.json").write_text(
                     json.dumps(
                         {

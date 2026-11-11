@@ -1759,6 +1759,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 str(float(args.prediction_threshold_percentile)),
             )
         )
+    if args.save_prediction_npz:
+        effective_training_args.append("--save-gaussian-npz")
     if args.output_mode == "json-only":
         effective_training_args.extend(
             ("--evaluation-cache-only", "--no-volume-gif")
