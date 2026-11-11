@@ -1,7 +1,7 @@
 # Stage-2 NPZ reconstruction
 
 `train_stage2_npz.py` reads the Stage-2 ImageCAS NPZ format directly, selects
-one or more stored views, creates an ASTRA `cone_vec` geometry from their `theta_deg`
+one to seven stored views, creates an ASTRA `cone_vec` geometry from their `theta_deg`
 and `phi_deg`, initializes with FDK/BP or a trained monocular Gaussian Center
 Predictor (GCP), optimizes the 3D Gaussians for that case, and exports the
 Gaussian parameters, reconstructed volume, and remaining novel views.
@@ -11,11 +11,14 @@ script therefore compares them to `1 - exp(-gain * line_integral)` during
 optimization. The gain is estimated from the selected method's initialization
 volume unless `--silhouette-gain` is supplied.
 
-In GCP mode, **only the first index passed to `--view-indices`** enters the
-monocular predictor. All selected views still enter the subsequent projection
-optimization. For example, `--view-indices 3 5` means view 3 initializes the
-centres while views 3 and 5 both constrain the reconstruction; predictions from
-multiple GCP runs are not fused.
+In GCP mode, the same monocular predictor processes **every selected view**.
+Each prediction is lifted into 3D with its own camera pose, and predictions
+falling in the same reconstruction voxel are averaged before Gaussian
+optimization. The optimization also uses every selected projection. With one
+view, the predictor still places centers in 3D along that view's rays; depth is
+learned from its checkpoint and remains ambiguous when the image offers no
+depth cues. Use `--init-method gcp --gcp-checkpoint ...` for this one-view path
+without FDK or BP initialization.
 
 ## Example
 
@@ -43,19 +46,25 @@ python train_stage2_npz.py \
   --prediction-threshold-percentile 97
 ```
 
+For one view, pass a single index with `--init-method gcp` and a checkpoint.
+For seven views, pass seven distinct indices, for example
+`--view-indices 0 1 2 3 4 5 6`. The checkpoint architecture is the same in
+both cases because the predictor shares its weights across views.
+
 The checkpoint records its required input resolution and downsampling factor.
-The first view is resized to that resolution, and its detector geometry is
-rescaled to the GCP output grid without changing the detector field of view.
-The predicted depth and ZYX offsets are lifted along the corresponding rays
-into normalized ZYX Gaussian centres.
+Each view is resized to that resolution, and its detector geometry is rescaled
+to the GCP output grid without changing the detector field of view. The
+predicted depth and ZYX offsets are lifted along the corresponding rays into
+normalized ZYX Gaussian centres.
 
 GCP defaults to the paper-style projection objective
 `0.5 * full_image_MSE + 0.5 * centerline_masked_MSE`. The 2D centerline masks
 are computed once by skeletonizing the binary target projections; no stored 3D
 centerline is needed. Override the full-image weight with
 `--projection-loss-alpha VALUE`. FDK and BP default to `1.0`, preserving their
-previous plain-MSE behavior. `--num-init-gaussians` applies to FDK/BP; in GCP
-mode the checkpoint output grid determines the initial count.
+previous plain-MSE behavior. `--num-init-gaussians` caps the initial count for
+both FDK/BP and GCP. In GCP mode, voxel fusion and this cap determine the
+initial count.
 
 For a short smoke run before committing to the full optimization:
 
@@ -84,7 +93,7 @@ using a different crop.
 - `gaussians.pt`: reloadable raw Gaussian state plus activated parameters and geometry.
 - `gaussians.npz`: portable centres, densities, scales, and rotations.
 - `initial_fbp_volume_zyx.npy`: normalized FDK initialization.
-- `initial_gcp_centers_normalized_zyx.npy`: monocular predictor output before Gaussian optimization (GCP mode).
+- `initial_gcp_centers_normalized_zyx.npy`: fused predictor output before Gaussian optimization (GCP mode).
 - `initial_gcp_volume_zyx.npy`: volume rendered from predicted centres before optimization (GCP mode).
 - `reconstructed_volume_zyx.npy`: final Gaussian volume in `[z,y,x]` order.
 - `reconstructed_volume_xyz.nii.gz`: final volume with millimetre voxel spacing, when nibabel is installed.
@@ -94,7 +103,7 @@ using a different crop.
 - `novel_views.npz`: projections, stored targets, errors, and per-view metrics at all unselected stored views by default.
 - `novel_view_reprojections.png`: target/reprojection/error montage for the requested novel views.
 - `optimization_timing.json`: CUDA-synchronized optimizer-loop wall time and run context, when `--record-optimization-time` is enabled.
-- `run_metadata.json`: selected views, initialization checkpoint/view, GCP
+- `run_metadata.json`: selected views, initialization checkpoint/views, GCP
   configuration, initial centre count, and projection-loss settings.
 
 The GIF and evaluation use the same threshold interface. The single-case
@@ -158,7 +167,7 @@ python evaluate_stage2_npz.py \
   --prediction-threshold-percentile 97
 ```
 
-`--view-indices` accepts one or more indices in both the single-case trainer and
+`--view-indices` accepts one to seven distinct indices in both the single-case trainer and
 split evaluator; the evaluator applies that selected list to every case in the
 split. Options not recognised by the evaluator, such as `--iterations` and
 other optimization settings, are forwarded to `train_stage2_npz.py`. Use

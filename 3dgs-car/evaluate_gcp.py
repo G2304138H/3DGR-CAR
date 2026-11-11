@@ -273,8 +273,8 @@ def resolve_view_sweep(config: Mapping[str, Any]) -> List[Tuple[int, List[int]]]
             raise ValueError(
                 "eval_num_views must be a positive integer or list of integers."
             ) from error
-        if count < 1:
-            raise ValueError("eval_num_views entries must be >= 1.")
+        if not 1 <= count <= 7:
+            raise ValueError("eval_num_views entries must be between 1 and 7.")
         if count in counts:
             raise ValueError(f"eval_num_views contains duplicate count {count}.")
         counts.append(count)
@@ -454,7 +454,7 @@ def resolve_evaluation_config(
         "depth_activation": "sigmoid",
         "offset_activation": "bounded_tanh",
         "coordinate_order": "normalized_zyx",
-        "initialization_view": "first_selected_view",
+        "initialization_view": "all_selected_views_voxel_fusion",
     }
     parameterization = _optional_mapping(
         model_options.get("parameterization"),
@@ -1225,7 +1225,7 @@ def _write_combined_outputs(
             "effective_view_sweep": resolved["effective_view_sweep"],
             "eval_view_selection": resolved["eval_view_selection"],
             "eval_view_selection_seed": resolved["eval_view_selection_seed"],
-            "initialization": "monocular_gcp_first_selected_view",
+            "initialization": "shared_gcp_all_selected_views_voxel_fusion",
             "gaussian_optimization_per_case": True,
             "view_directions_accurate": bool(
                 resolved["evaluation_view_directions"]["accurate"]
@@ -1514,7 +1514,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "format": "3dgr_car_gcp_evaluation_plan_v1",
         "evaluation_mode": mode,
         "gcp_checkpoint": resolved["checkpoint_path"],
-        "initialization_view_rule": "first selected view only",
+        "initialization_view_rule": "all selected views fused in reconstruction voxels",
         "optimization_view_rule": "all selected views",
         "evaluation_view_directions": resolved["evaluation_view_directions"],
         "runs": plan_runs,

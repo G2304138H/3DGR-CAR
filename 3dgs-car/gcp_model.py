@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor, nn
@@ -243,6 +243,28 @@ class MonocularGaussianCenterPredictor(nn.Module):
             prediction, ray_box_entry, ray_box_exit, clamp=clamp,
         )
 
+    def forward_views(self, images: Tensor) -> Dict[str, Tensor]:
+        """Apply the shared monocular predictor to ``[B,V,C,H,W]`` images.
+
+        View count is an input dimension, not a learned channel dimension, so
+        existing monocular checkpoints work for any supported view count.
+        Geometry-aware lifting and fusion happen after this prediction.
+        """
+        if images.ndim != 5:
+            raise ValueError(
+                f"images must have shape [B,V,C,H,W], got {tuple(images.shape)}."
+            )
+        batch_size, num_views, channels, height, width = images.shape
+        if batch_size < 1 or not 1 <= num_views <= 7:
+            raise ValueError("Expected a nonempty batch with one to seven views.")
+        prediction = self.forward(
+            images.reshape(batch_size * num_views, channels, height, width)
+        )
+        return {
+            key: value.reshape(batch_size, num_views, *value.shape[1:])
+            for key, value in prediction.items()
+        }
+
 
 def _split_prediction(
     prediction: Union[Mapping[str, Tensor], Tensor],
@@ -339,6 +361,38 @@ def lift_depth_offsets_to_centers(
     return centers.reshape(depth.shape[0], -1, 3)
 
 
+def fuse_gcp_centers(
+    centers_by_view: Sequence[Tensor], grid_size: int,
+    max_centers: Optional[int] = None,
+) -> Tensor:
+    """Average predictions in shared voxels, then apply a spatially spread cap."""
+    if not centers_by_view:
+        raise ValueError("At least one view of predicted centers is required.")
+    if grid_size <= 0:
+        raise ValueError("grid_size must be positive.")
+    if max_centers is not None and max_centers <= 0:
+        raise ValueError("max_centers must be positive.")
+    centers = torch.cat(tuple(centers_by_view), dim=0)
+    if centers.shape[0] == 0:
+        raise RuntimeError("No GCP rays intersect the reconstruction cube.")
+    voxel = (centers.clamp(0.0, 1.0) * (grid_size - 1)).round().long()
+    keys = (voxel[:, 0] * grid_size + voxel[:, 1]) * grid_size + voxel[:, 2]
+    if len(centers_by_view) > 1:
+        keys, inverse = torch.unique(keys, sorted=True, return_inverse=True)
+        sums = torch.zeros(
+            (int(inverse.max().item()) + 1, 3),
+            device=centers.device, dtype=centers.dtype,
+        )
+        sums.index_add_(0, inverse, centers)
+        counts = torch.bincount(inverse, minlength=sums.shape[0]).to(centers.dtype)
+        centers = sums / counts.unsqueeze(1)
+    if max_centers is not None and centers.shape[0] > max_centers:
+        spatial_order = (keys * 1103515245 + 12345) % 2147483647
+        chosen = torch.topk(spatial_order, max_centers, largest=False).indices
+        centers = centers[chosen]
+    return centers
+
+
 def make_gcp_checkpoint(
     model: MonocularGaussianCenterPredictor, **metadata: Any,
 ) -> Dict[str, Any]:
@@ -405,6 +459,7 @@ def load_gcp_checkpoint(
 __all__ = [
     "GCPModelConfig",
     "MonocularGaussianCenterPredictor",
+    "fuse_gcp_centers",
     "lift_depth_offsets_to_centers",
     "load_gcp_checkpoint",
     "make_gcp_checkpoint",

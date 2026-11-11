@@ -130,7 +130,7 @@ class GcpEvaluationConfigTests(unittest.TestCase):
                             "depth_activation": "sigmoid",
                             "offset_activation": "bounded_tanh",
                             "coordinate_order": "normalized_zyx",
-                            "initialization_view": "first_selected_view",
+                            "initialization_view": "all_selected_views_voxel_fusion",
                         },
                     },
                     "eval_output_dir": str(output),
@@ -163,6 +163,12 @@ class GcpEvaluationConfigTests(unittest.TestCase):
             ),
             [(1, [6]), (2, [6, 4]), (4, [6, 4, 2, 0])],
         )
+        self.assertEqual(
+            resolve_view_sweep({"eval_num_views": 7}),
+            [(7, list(range(7)))],
+        )
+        with self.assertRaisesRegex(ValueError, "between 1 and 7"):
+            resolve_view_sweep({"eval_num_views": 8})
 
     def test_fixed_inaccurate_direction_options_are_validated(self):
         options = resolve_evaluation_view_directions(

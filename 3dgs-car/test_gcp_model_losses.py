@@ -14,6 +14,7 @@ from gcp_losses import (
 from gcp_model import (
     GCPModelConfig,
     MonocularGaussianCenterPredictor,
+    fuse_gcp_centers,
     lift_depth_offsets_to_centers,
     load_gcp_checkpoint,
     make_gcp_checkpoint,
@@ -74,6 +75,28 @@ class GCPModelTests(unittest.TestCase):
         )
         self.assertTrue(bool((mapping_centers >= 0.0).all()))
         self.assertTrue(bool((mapping_centers <= 1.0).all()))
+
+    def test_shared_predictor_accepts_one_two_and_seven_views(self):
+        model = self._model().eval()
+        for num_views in (1, 2, 7):
+            images = torch.randn(1, num_views, 1, 32, 32)
+            with torch.no_grad():
+                prediction = model.forward_views(images)
+                independent = model(images.reshape(num_views, 1, 32, 32))
+            self.assertEqual(prediction["depth"].shape, (1, num_views, 1, 16, 16))
+            self.assertEqual(prediction["offsets"].shape, (1, num_views, 3, 16, 16))
+            torch.testing.assert_close(prediction["depth"][0], independent["depth"])
+        with self.assertRaisesRegex(ValueError, "one to seven"):
+            model.forward_views(torch.zeros(1, 8, 1, 32, 32))
+
+    def test_voxel_fusion_keeps_gradients_to_each_view(self):
+        first = torch.tensor([[0.25, 0.35, 0.45]], requires_grad=True)
+        second = torch.tensor([[0.26, 0.36, 0.46]], requires_grad=True)
+        fused = fuse_gcp_centers([first, second], grid_size=16)
+        self.assertEqual(fused.shape, (1, 3))
+        fused.sum().backward()
+        self.assertGreater(float(first.grad.abs().sum()), 0.0)
+        self.assertGreater(float(second.grad.abs().sum()), 0.0)
 
     def test_checkpoint_roundtrip_preserves_config_and_outputs(self):
         torch.manual_seed(7)

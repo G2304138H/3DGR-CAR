@@ -9,9 +9,11 @@ from pathlib import Path
 import numpy as np
 
 from gcp_dataset import (
+    CaseGCPDataset,
     GCPCasePair,
     PairedGCPDataset,
     discover_case_pairs,
+    gcp_case_collate,
     gcp_collate,
     torch,
 )
@@ -138,6 +140,63 @@ class RayTargetTests(unittest.TestCase):
 
 
 class PairAndDatasetTests(unittest.TestCase):
+    def test_case_dataset_samples_one_view_subset_per_case_and_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pairs = []
+            for case_id, views in (("1", 7), ("2", 2)):
+                projection = root / f"lca_000{case_id}.npz"
+                ground_truth = root / f"{case_id}.npz"
+                _write_projection(projection, f"lca_000{case_id}", case_id, views)
+                volume = np.zeros((5, 5, 5), dtype=np.uint8)
+                volume[2, 2, 2] = 1
+                np.savez(
+                    ground_truth, vol=volume,
+                    spacing=np.full(3, 100.0, dtype=np.float32),
+                )
+                pairs.append(GCPCasePair(projection, ground_truth, f"lca_000{case_id}"))
+            dataset = CaseGCPDataset(
+                pairs, image_size=4, volume_size=5, downsample_factor=2,
+                cache_dir=root / "cache", min_input_views=1,
+                max_input_views=7, selection_seed=42,
+            )
+            self.assertEqual(len(dataset), 2)
+            plans = []
+            for epoch in range(10):
+                dataset.set_epoch(epoch)
+                plans.append(dataset.view_selections)
+                for selected, available in zip(dataset.view_selections, (7, 2)):
+                    self.assertGreaterEqual(len(selected), 1)
+                    self.assertLessEqual(len(selected), available)
+                    self.assertEqual(len(set(selected)), len(selected))
+            self.assertGreater(len(set(plans)), 1)
+            dataset.set_epoch(3)
+            sample = dataset[0]
+            self.assertEqual(sample["image"].shape[0], len(sample["view_indices"]))
+            self.assertEqual(sample["depth"].shape[0], len(sample["view_indices"]))
+            self.assertEqual(sample["ray_entry_zyx"].shape[0], len(sample["view_indices"]))
+            self.assertEqual(len(gcp_case_collate([sample, dataset[1]])["cases"]), 2)
+            dataset.set_epoch(3)
+            self.assertEqual(dataset.view_selections, plans[3])
+
+            validation = CaseGCPDataset(
+                pairs, image_size=4, volume_size=5, downsample_factor=2,
+                min_input_views=1, max_input_views=7, randomize_views=False,
+            )
+            self.assertEqual(tuple(map(len, validation.view_selections)), (7, 2))
+            validation.set_epoch(5)
+            self.assertEqual(tuple(map(len, validation.view_selections)), (7, 2))
+            seven_only = CaseGCPDataset(
+                pairs[:1], image_size=4, volume_size=5, downsample_factor=2,
+                min_input_views=7, max_input_views=7,
+            )
+            self.assertEqual(len(seven_only.view_selections[0]), 7)
+            with self.assertRaisesRegex(ValueError, "fewer than the configured minimum"):
+                CaseGCPDataset(
+                    pairs, image_size=4, volume_size=5, downsample_factor=2,
+                    min_input_views=3, max_input_views=7,
+                )
+
     def test_pair_discovery_prefers_vessel_case_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

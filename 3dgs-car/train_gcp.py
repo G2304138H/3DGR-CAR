@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Train the monocular Gaussian Centre Predictor on paired Stage-2 NPZ data.
+"""Train a shared Gaussian Centre Predictor with variable input views.
 
-Each projection view is an independent monocular sample.  The trained model
-predicts depth and a bounded 3D offset for every cell of a downsampled detector
-grid.  Camera rays lift those predictions into normalized ZYX Gaussian centres.
+Each epoch visits every case once. A seeded per-case subset of views is lifted
+into 3D and fused before volume and point-cloud supervision.
 """
 
 from __future__ import annotations
@@ -24,11 +23,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from gcp_dataset import PairedGCPDataset, discover_case_pairs, gcp_collate
+from gcp_dataset import CaseGCPDataset, discover_case_pairs, gcp_case_collate
 from gcp_losses import GCPLossWeights, gcp_loss, trilinear_point_splat
 from gcp_model import (
     GCPModelConfig,
     MonocularGaussianCenterPredictor,
+    fuse_gcp_centers,
     lift_depth_offsets_to_centers,
     make_gcp_checkpoint,
 )
@@ -177,7 +177,7 @@ def _move_batch(batch: Mapping[str, Any], device: torch.device) -> Dict[str, Any
 def _finite_loss(loss: torch.Tensor, batch: Mapping[str, Any]) -> None:
     if not bool(torch.isfinite(loss)):
         cases = batch.get("case_name", "unknown")
-        views = batch.get("view_index", "unknown")
+        views = batch.get("view_indices", batch.get("view_index", "unknown"))
         raise FloatingPointError(
             f"Non-finite GCP loss for cases={cases}, views={views}."
         )
@@ -334,6 +334,131 @@ def run_epoch(
     return {name: value / sample_count for name, value in totals.items()}
 
 
+def _case_loss(
+    model: MonocularGaussianCenterPredictor,
+    case: Mapping[str, Any],
+    loss_weights: GCPLossWeights,
+    volume_size: int,
+    max_predicted_centers: int,
+    chamfer_chunk_size: int,
+    skeleton_iterations: int,
+) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Supervise all selected depths and their fused 3D reconstruction."""
+    num_views = int(case["image"].shape[0])
+    prediction = model.forward_views(case["image"].unsqueeze(0))
+    prediction_for_loss = {
+        "depth": prediction["depth"][0].to(dtype=case["depth"].dtype),
+        "offsets": prediction["offsets"][0].to(
+            dtype=case["ray_entry_zyx"].dtype
+        ),
+    }
+    lifted = lift_depth_offsets_to_centers(
+        prediction_for_loss, case["ray_entry_zyx"], case["ray_exit_zyx"],
+    )
+    valid = case["ray_valid_mask"].reshape(num_views, -1).bool()
+    if valid.shape != lifted.shape[:2]:
+        raise ValueError("ray_valid_mask and lifted centres disagree.")
+    fused = fuse_gcp_centers(
+        [points[mask] for points, mask in zip(lifted, valid)],
+        grid_size=volume_size,
+        max_centers=max_predicted_centers,
+    )
+    predicted_volume = trilinear_point_splat(
+        fused.unsqueeze(0), grid_size=volume_size,
+    )
+    return gcp_loss(
+        fused.unsqueeze(0),
+        case["point_cloud"].unsqueeze(0),
+        None,
+        prediction_for_loss["depth"],
+        case["depth"],
+        case["depth_mask"],
+        predicted_volume,
+        case["volume"].unsqueeze(0),
+        loss_weights,
+        chamfer_chunk_size=chamfer_chunk_size,
+        skeleton_iterations=skeleton_iterations,
+    )
+
+
+def run_case_epoch(
+    model: MonocularGaussianCenterPredictor,
+    loader: DataLoader,
+    device: torch.device,
+    loss_weights: GCPLossWeights,
+    volume_size: int,
+    max_predicted_centers: int,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    scaler: Optional[Any] = None,
+    gradient_clip_norm: float = 0.0,
+    chamfer_chunk_size: int = 1024,
+    skeleton_iterations: int = 3,
+) -> Dict[str, float]:
+    """Run one pass over cases, giving each case equal loss weight."""
+    training = optimizer is not None
+    model.train(training)
+    totals: Dict[str, float] = {}
+    case_count = 0
+    view_count = 0
+    amp_enabled = bool(scaler is not None and scaler.is_enabled())
+    for raw_batch in loader:
+        cases = [_move_batch(case, device) for case in raw_batch["cases"]]
+        if training:
+            optimizer.zero_grad(set_to_none=True)
+        with torch.set_grad_enabled(training):
+            with _autocast_context(amp_enabled, device):
+                case_results = [
+                    _case_loss(
+                        model, case, loss_weights, volume_size,
+                        max_predicted_centers, chamfer_chunk_size,
+                        skeleton_iterations,
+                    )
+                    for case in cases
+                ]
+                losses = [result[0] for result in case_results]
+                loss = torch.stack(losses).mean()
+                components = {
+                    key: torch.stack([result[1][key] for result in case_results]).mean()
+                    for key in case_results[0][1]
+                }
+                _finite_loss(
+                    loss,
+                    {
+                        "case_name": [case["case_name"] for case in cases],
+                        "view_indices": [case["view_indices"] for case in cases],
+                    },
+                )
+            if training:
+                if amp_enabled:
+                    assert scaler is not None
+                    scaler.scale(loss).backward()
+                    if gradient_clip_norm > 0.0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), gradient_clip_norm
+                        )
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    if gradient_clip_norm > 0.0:
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), gradient_clip_norm
+                        )
+                    optimizer.step()
+        batch_size = len(cases)
+        for name, value in {"loss": loss.detach(), **components}.items():
+            scalar = float(value.detach().item())
+            totals[name] = totals.get(name, 0.0) + scalar * batch_size
+        case_count += batch_size
+        view_count += sum(len(case["view_indices"]) for case in cases)
+    if case_count == 0:
+        raise RuntimeError("The GCP case loader produced no samples.")
+    metrics = {name: value / case_count for name, value in totals.items()}
+    metrics["mean_input_views"] = view_count / case_count
+    return metrics
+
+
 def _atomic_torch_save(payload: object, path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, temporary)
@@ -375,7 +500,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
 
     parser = argparse.ArgumentParser(
-        description="Train the monocular Gaussian Centre Predictor."
+        description="Train the shared Gaussian Centre Predictor on variable view subsets."
     )
     parser.add_argument(
         "--config",
@@ -429,6 +554,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--norm-groups", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--max-points", type=int, default=10000)
+    parser.add_argument(
+        "--min-input-views", type=int, default=1,
+        help="Minimum randomly selected input views per training case (1 to 7).",
+    )
+    parser.add_argument(
+        "--max-input-views", type=int, default=7,
+        help="Maximum randomly selected input views per training case (1 to 7).",
+    )
+    parser.add_argument(
+        "--max-predicted-centers", type=int, default=10000,
+        help="Maximum fused GCP centers per case, matching reconstruction initialization.",
+    )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -483,6 +620,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("--epochs and --batch-size must be positive.")
     if args.max_points is not None and args.max_points <= 0:
         parser.error("--max-points must be positive.")
+    if not 1 <= args.min_input_views <= args.max_input_views <= 7:
+        parser.error("Expected 1 <= --min-input-views <= --max-input-views <= 7.")
+    if args.max_predicted_centers <= 0:
+        parser.error("--max-predicted-centers must be positive.")
+    if args.seed < 0:
+        parser.error("--seed must be non-negative.")
     if args.source_origin_distance_m <= 0.0:
         parser.error("--source-origin-distance-m must be positive.")
     if args.expected_detector_pixel_spacing_mm is not None and (
@@ -556,24 +699,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         volume_extent_m=args.volume_extent_m,
         downsample_factor=int(args.downsample_factor),
         cache_dir=cache_dir,
-        max_points=int(args.max_points),
+        max_points=(None if args.max_points is None else int(args.max_points)),
         source_origin_distance_m=float(args.source_origin_distance_m),
         fallback_detector_pixel_spacing_mm=(
             args.fallback_detector_pixel_spacing_mm
         ),
         fallback_sid_m=args.fallback_sid_m,
     )
-    train_dataset = PairedGCPDataset(train_pairs, **dataset_kwargs)
-    validation_dataset = PairedGCPDataset(validation_pairs, **dataset_kwargs)
+    train_dataset = CaseGCPDataset(
+        train_pairs,
+        min_input_views=int(args.min_input_views),
+        max_input_views=int(args.max_input_views),
+        randomize_views=True,
+        selection_seed=int(args.seed),
+        **dataset_kwargs,
+    )
+    validation_dataset = CaseGCPDataset(
+        validation_pairs,
+        min_input_views=int(args.min_input_views),
+        max_input_views=int(args.max_input_views),
+        randomize_views=False,
+        selection_seed=int(args.seed),
+        **dataset_kwargs,
+    )
 
     generator = torch.Generator()
     generator.manual_seed(int(args.seed))
     loader_kwargs = dict(
         batch_size=int(args.batch_size),
         num_workers=int(args.num_workers),
-        collate_fn=gcp_collate,
+        collate_fn=gcp_case_collate,
         pin_memory=device.type == "cuda",
-        persistent_workers=int(args.num_workers) > 0,
+        # Epoch selections live in the dataset. New workers must receive the
+        # updated selection plan after set_epoch() in the parent process.
+        persistent_workers=False,
     )
     train_loader = DataLoader(
         train_dataset, shuffle=True, generator=generator, **loader_kwargs,
@@ -640,6 +799,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "validation_cases": [pair.case_name for pair in validation_pairs],
         "train_samples": len(train_dataset),
         "validation_samples": len(validation_dataset),
+        "sampling_unit": "one_case_per_epoch",
+        "validation_view_selection": "first_available_up_to_max_input_views",
         "coordinate_order": "normalized_zyx",
         "depth_background": 1.0,
     }
@@ -650,12 +811,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     history_path = output_dir / "history.jsonl"
     for epoch in range(start_epoch, int(args.epochs)):
         epoch_start = time.perf_counter()
-        train_metrics = run_epoch(
+        train_dataset.set_epoch(epoch)
+        train_metrics = run_case_epoch(
             model,
             train_loader,
             device,
             loss_weights,
             int(args.volume_size),
+            int(args.max_predicted_centers),
             optimizer=optimizer,
             scaler=scaler,
             gradient_clip_norm=float(args.gradient_clip_norm),
@@ -663,12 +826,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             skeleton_iterations=int(args.skeleton_iterations),
         )
         with torch.no_grad():
-            validation_metrics = run_epoch(
+            validation_metrics = run_case_epoch(
                 model,
                 validation_loader,
                 device,
                 loss_weights,
                 int(args.volume_size),
+                int(args.max_predicted_centers),
                 chamfer_chunk_size=int(args.chamfer_chunk_size),
                 skeleton_iterations=int(args.skeleton_iterations),
             )
@@ -677,6 +841,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "elapsed_seconds": time.perf_counter() - epoch_start,
             "train": train_metrics,
             "validation": validation_metrics,
+            "train_view_selections": {
+                pair.case_name: list(indices)
+                for pair, indices in zip(train_pairs, train_dataset.view_selections)
+            },
         }
         with history_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record) + "\n")

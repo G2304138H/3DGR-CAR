@@ -1,8 +1,7 @@
 """Paired projection/volume dataset for Gaussian Center Predictor training.
 
-Each projection view is one monocular sample.  Multiple views of the same case
-therefore share an aligned volume and point cloud but have view-specific rays
-and first-hit depth targets.
+The per-view dataset supplies cached ray targets. The case-level dataset draws
+one view subset per case and epoch for variable-view training.
 """
 
 from __future__ import annotations
@@ -626,6 +625,111 @@ class PairedGCPDataset(Dataset):
         return numeric
 
 
+class CaseGCPDataset(PairedGCPDataset):
+    """Yield each case once with a deterministic per-epoch sampled view subset.
+
+    The selection is computed in the main process before workers start, so all
+    workers see the same plan and resume from an epoch reproduces its subsets.
+    """
+
+    def __init__(
+        self, pairs: Sequence[GCPCasePair], *,
+        min_input_views: int = 1, max_input_views: int = 7,
+        randomize_views: bool = True, selection_seed: int = 0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(pairs, **kwargs)
+        self.min_input_views = int(min_input_views)
+        self.max_input_views = int(max_input_views)
+        if not 1 <= self.min_input_views <= self.max_input_views <= 7:
+            raise ValueError("Expected 1 <= min_input_views <= max_input_views <= 7.")
+        self.randomize_views = bool(randomize_views)
+        self.selection_seed = int(selection_seed)
+        if self.selection_seed < 0:
+            raise ValueError("selection_seed must be non-negative.")
+        counts = [0] * len(self.pairs)
+        for pair_index, _ in self._sample_index:
+            counts[pair_index] += 1
+        self.view_counts = tuple(counts)
+        for pair, count in zip(self.pairs, self.view_counts):
+            if count < self.min_input_views:
+                raise ValueError(
+                    f"{pair.case_name!r} has {count} views, fewer than the "
+                    f"configured minimum {self.min_input_views}."
+                )
+        self.set_epoch(0)
+
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Choose one count and distinct stored views for every case."""
+        if int(epoch) < 0:
+            raise ValueError("epoch must be non-negative.")
+        self.epoch = int(epoch)
+        selections = []
+        for pair_index, available in enumerate(self.view_counts):
+            upper = min(self.max_input_views, available)
+            if self.randomize_views:
+                rng = np.random.default_rng(
+                    np.random.SeedSequence(
+                        [self.selection_seed, self.epoch, pair_index]
+                    )
+                )
+                count = int(rng.integers(self.min_input_views, upper + 1))
+                indices = rng.choice(available, size=count, replace=False)
+            else:
+                indices = np.arange(upper, dtype=np.int64)
+            selections.append(tuple(int(index) for index in indices))
+        self.view_selections = tuple(selections)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        pair_index = int(index)
+        pair = self.pairs[pair_index]
+        case = self._projection_case(pair_index)
+        selected = self.view_selections[pair_index]
+        views = [self._sample_numpy(pair_index, view_index) for view_index in selected]
+        view_fields = (
+            "image", "depth", "depth_mask", "ray_valid_mask",
+            "ray_entry_zyx", "ray_exit_zyx", "cone_vector",
+        )
+        arrays = {
+            key: np.ascontiguousarray(np.stack([view[key] for view in views]))
+            for key in view_fields
+        }
+        arrays.update(
+            volume=views[0]["volume"],
+            point_cloud=views[0]["point_cloud"],
+            volume_extent_m=views[0]["volume_extent_m"],
+        )
+        if torch is not None:
+            numeric = {
+                key: torch.from_numpy(
+                    value.copy() if not value.flags.writeable else value
+                )
+                for key, value in arrays.items()
+            }
+        else:
+            numeric = arrays
+        numeric.update(
+            case_name=pair.case_name or case.sample_name,
+            view_indices=list(selected),
+            clinical_views=[str(case.clinical_views[i]) for i in selected],
+            projection_path=str(pair.projection_path),
+            ground_truth_path=str(pair.ground_truth_path),
+            vessel_type=pair.vessel_type or "",
+            case_id=pair.case_id or "",
+        )
+        return numeric
+
+
+def gcp_case_collate(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Keep cases separate because each can have a different view count."""
+    if not batch:
+        raise ValueError("Cannot collate an empty batch.")
+    return {"cases": list(batch)}
+
+
 def gcp_collate(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Stack fixed fields and pad variable point clouds with ``point_mask``."""
 
@@ -677,9 +781,11 @@ def gcp_collate(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 __all__ = [
+    "CaseGCPDataset",
     "GCPCasePair",
     "PairedGCPDataset",
     "discover_case_pairs",
     "gcp_collate",
+    "gcp_case_collate",
     "resize_projection_bilinear",
 ]

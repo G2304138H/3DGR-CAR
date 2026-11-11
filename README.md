@@ -85,10 +85,10 @@ We use public dataset from [ASOCA](https://asoca.grand-challenge.org/) and [Imag
 
 ## Stage-2 NPZ reconstruction
 
-The adapted two-view reconstruction entry point reads Stage-2 projection NPZ
-files directly. It uses the stored per-view geometry for FDK initialization,
-per-case Gaussian optimization, reconstructed-volume export, and input/novel
-view reprojection. See
+The adapted reconstruction entry point reads Stage-2 projection NPZ files
+directly and accepts one to seven input views. It uses the stored per-view
+geometry for FDK/BP or learned center initialization, per-case Gaussian
+optimization, reconstructed-volume export, and input/novel view reprojection. See
 [3dgs-car/STAGE2_NPZ_RECONSTRUCTION.md](3dgs-car/STAGE2_NPZ_RECONSTRUCTION.md)
 for the data contract and commands.
 

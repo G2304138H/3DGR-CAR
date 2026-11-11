@@ -1,10 +1,11 @@
 # Monocular Gaussian Center Predictor
 
 This implementation adds the learned initialization stage described by
-3DGR-CAR while retaining the existing FDK/BP baselines. Each stored projection
-is one monocular GCP training sample. During reconstruction, only the first
-selected view initializes the Gaussians; all selected views are used by the
-subsequent projection optimization.
+3DGR-CAR while retaining the existing FDK/BP baselines. Each training case
+contributes one sampled view subset per epoch. During reconstruction, the shared GCP
+processes each of one to seven selected views. Its predictions are lifted with
+the corresponding camera poses and fused in the 3D voxel grid before Gaussian
+optimization, which also uses every selected projection.
 
 ## Paired data
 
@@ -69,6 +70,17 @@ source-to-isocentre distance, and 0.9 m SID.
 Train separate LCA and RCA predictors with these independently generated split
 files. Combining them into one model could put the LCA and RCA of the same
 physical patient into different train/validation partitions.
+
+The training settings `min_input_views` and `max_input_views` default to `1`
+and `7`. At the start of each epoch, the trainer visits every training case
+once, samples a count uniformly within those bounds, then samples that many
+distinct stored views from the case. If a case has fewer views than the maximum,
+its count is capped at the available number; a case below the minimum is an
+error. Each selected view receives depth supervision, while their 3D centers
+are fused before the point-cloud and volume losses. Validation uses the first
+available views up to the configured maximum so its loss is comparable across
+epochs. `history.jsonl` records each case's sampled indices for every epoch.
+`max_predicted_centers` (default `10000`) caps the fused center set for training.
 
 ## Python environment on the training server
 
@@ -194,8 +206,8 @@ python train_stage2_npz.py \
   --iterations 8000
 ```
 
-In this example, view `0` is the sole GCP input. Views `0` and `1` both enter
-the Gaussian projection loss. The GCP path defaults to the paper-inspired loss
+In this example, views `0` and `1` both enter GCP initialization and the
+Gaussian projection loss. The GCP path defaults to the paper-inspired loss
 
 ```text
 0.5 * full_image_mse + 0.5 * centerline_masked_mse
@@ -276,9 +288,8 @@ of cases that receive optimization and metrics.
 `eval_num_views` may be one integer or a list such as `[1, 2, 4]`.
 `eval_view_indices` defines the fixed order, and each view-count run uses its
 prefix: with `[0, 1, 2, 3]`, the one-view run uses `[0]`, the two-view run uses
-`[0, 1]`, and the four-view run uses `[0, 1, 2, 3]`. Only the first selected
-view enters the monocular GCP; all selected views constrain the subsequent
-Gaussian optimization.
+`[0, 1]`, and the four-view run uses `[0, 1, 2, 3]`. Every selected view enters
+the shared GCP and the subsequent Gaussian optimization.
 
 ### Run the LCA and RCA validation-plus-test evaluations with Python
 
@@ -321,8 +332,8 @@ or, for RCA:
 python -m evaluate_gcp --config configs/eval_gcp_paper_metric_rca_val_test.json --num-views 4 --view-indices 0 1 2 3
 ```
 
-The four-view result is written below `metrics/by_view_count/k4`. The monocular
-GCP still uses view 0 to initialize Gaussian centers; views 0, 1, 2, and 3 all
+The four-view result is written below `metrics/by_view_count/k4`. The shared
+GCP uses views 0, 1, 2, and 3 to initialize Gaussian centers, and all four
 constrain the subsequent Gaussian primitive optimization.
 
 Add `--dry-run` to either command to resolve the paths and write the evaluation
@@ -358,8 +369,8 @@ python -m evaluate_gcp --config configs/eval_gcp_inaccurate_view_direction_rca_v
 These configurations always use exactly two projection images, views 0 and 1.
 At each condition, the same fixed signed theta/phi change is applied to the
 assumed geometry of both input views. The images and source NPZ metadata are
-not edited. The inaccurate first-view geometry is used to lift the monocular
-GCP prediction into 3D Gaussian centres, and the inaccurate two-view geometry
+not edited. The inaccurate geometry of both views is used to lift the shared
+GCP predictions into 3D Gaussian centres, and the inaccurate two-view geometry
 is used throughout Gaussian primitive optimization. Ground truth and any
 novel-view scoring geometry remain accurate.
 
@@ -492,8 +503,8 @@ Each invocation creates a case-specific output root below the configured
 `eval_output_dir`. The `visualization/k<N>/cases/<case>` directories retain the
 initial GCP centers and volume, optimized Gaussian `.pt`/`.npz` files,
 reconstructed `.npy`/NIfTI/GIF volumes, input-view and novel-view reprojection
-montages, optimization timing, run metadata, and per-case metrics. The first
-selected view initializes the GCP; every selected view participates in the
+montages, optimization timing, run metadata, and per-case metrics. Every
+selected view initializes the Gaussians and participates in the
 Gaussian primitive optimization. Add `--dry-run` to inspect the resolved plan
 without starting CUDA work.
 

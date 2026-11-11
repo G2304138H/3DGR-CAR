@@ -326,6 +326,14 @@ def _numeric_case_id(value: str) -> Optional[int]:
     return None if match is None else int(match.group(1))
 
 
+def nested_case_identity(path: Path) -> Optional[Tuple[str, int]]:
+    """Recognize realism archives at <artery>/<case-number>/<filename>.npz."""
+    vessel = path.parent.parent.name.lower()
+    if vessel in {"rca", "lca"} and path.parent.name.isdigit():
+        return vessel, int(path.parent.name)
+    return None
+
+
 class NpzIndex:
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
@@ -338,7 +346,10 @@ class NpzIndex:
         self.by_number: Dict[int, List[Path]] = {}
         for path in self.paths:
             self.by_stem.setdefault(path.stem.lower(), []).append(path)
-            number = _numeric_case_id(path.stem)
+            nested = nested_case_identity(path)
+            if nested is not None and path.stem.lower() != f"{nested[0]}_{nested[1]:04d}":
+                self.by_stem.setdefault(f"{nested[0]}_{nested[1]:04d}", []).append(path)
+            number = nested[1] if nested is not None else _numeric_case_id(path.stem)
             if number is not None:
                 self.by_number.setdefault(number, []).append(path)
 
@@ -404,6 +415,17 @@ def projection_case_identity(path: Path) -> Tuple[str, Optional[str], Optional[s
             vessel_type = match.group(1).lower()
         if not case_id:
             case_id = str(int(match.group(2)))
+    nested = nested_case_identity(path)
+    if nested is not None:
+        artery, number = nested
+        if vessel_type and vessel_type != artery:
+            raise ValueError(f"Conflicting artery metadata and directory: {path}")
+        if case_id and (not case_id.isdigit() or int(case_id) != number):
+            raise ValueError(f"Conflicting case_id metadata and directory: {path}")
+        typed = re.fullmatch(r"(rca|lca)[_-]?(\d+)", sample_name, re.IGNORECASE)
+        if typed and (typed.group(1).lower(), int(typed.group(2))) != nested:
+            raise ValueError(f"Conflicting sample_name and directory: {path}")
+        sample_name, vessel_type, case_id = f"{artery}_{number:04d}", artery, str(number)
     return sample_name, vessel_type or None, case_id or None
 
 
@@ -1411,7 +1433,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         type=int,
         default=[0, 1],
         help=(
-            "One or more stored view indices used as reconstruction inputs for "
+            "One to seven distinct stored view indices used as reconstruction inputs for "
             "every case in this evaluation run."
         ),
     )
@@ -1653,6 +1675,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help="Reject rather than only flag a translated case below the visibility threshold.",
     )
     args, training_args = parser.parse_known_args(argv)
+    if not 1 <= len(args.view_indices) <= 7:
+        parser.error("--view-indices requires one to seven input views.")
+    if len(set(args.view_indices)) != len(args.view_indices):
+        parser.error("--view-indices must be distinct.")
     forbidden = {"--input", "--output-dir"}
     conflicting = sorted(forbidden.intersection(training_args))
     if conflicting:
@@ -1804,6 +1830,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             projection_path = projection_index.resolve([reference], "projection")
             sample_name = projection_sample_name(projection_path)
+            output_case_name = sample_name if nested_case_identity(projection_path) else projection_path.stem
             record["case_name"] = sample_name
             record["projection_npz"] = str(projection_path)
             (
@@ -1823,7 +1850,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record["vessel_type"] = vessel_type
             record["source_case_id"] = source_case_id
             record["ground_truth_match_references"] = ground_truth_references
-            case_output_dir = output_dir / "cases" / projection_path.stem
+            case_output_dir = output_dir / "cases" / output_case_name
             cache_had_files = bool(
                 case_output_dir.is_dir() and any(case_output_dir.iterdir())
             )
@@ -2192,7 +2219,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 prediction_dir.mkdir(parents=True, exist_ok=True)
                 prediction_path = (
                     prediction_dir
-                    / f"{projection_path.stem}_gaussian_prediction.npz"
+                    / f"{output_case_name}_gaussian_prediction.npz"
                 )
                 shutil.copy2(gaussian_prediction_path, prediction_path)
                 record["prediction_npz"] = str(prediction_path)
@@ -2200,12 +2227,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.output_mode == "full" or args.save_evaluation_arrays:
                 if args.output_mode == "full":
                     case_metrics_dir = (
-                        output_dir / "metrics" / "cases" / projection_path.stem
+                        output_dir / "metrics" / "cases" / output_case_name
                     )
                     arrays_path = case_metrics_dir / "evaluation_arrays.npz"
                 else:
                     case_metrics_dir = output_dir / "voxel_masks"
-                    arrays_path = case_metrics_dir / f"{projection_path.stem}.npz"
+                    arrays_path = case_metrics_dir / f"{output_case_name}.npz"
                 case_metrics_dir.mkdir(parents=True, exist_ok=True)
                 if not args.save_ssim_map:
                     arrays.pop("ssim_map_valid_zyx")

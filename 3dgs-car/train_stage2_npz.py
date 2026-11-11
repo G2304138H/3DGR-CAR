@@ -4,8 +4,8 @@
 This entry point is deliberately separate from ``train.py``.  The released demo
 uses a one-angle circular ODL geometry and synthesizes its own projections from
 a ground-truth volume.  Stage-2 NPZ files instead contain binary masks rendered
-with arbitrary two-angle camera poses.  Here those poses are represented as
-ASTRA ``cone_vec`` geometry, used consistently for initialization, optimization,
+with arbitrary two-angle camera poses. One to seven selected poses are represented
+as ASTRA ``cone_vec`` geometry, used consistently for initialization, optimization,
 and novel-view rendering.
 """
 
@@ -267,8 +267,8 @@ class AstraConeVecProjector:
         except Exception as error:
             raise RuntimeError(
                 f"ASTRA {algorithm_name} failed for the selected cone-vector views. "
-                "FDK assumes a circular cone-beam scan and two tilted views are a "
-                "very sparse approximation. Try `--init-method bp` only if ASTRA "
+                "FDK assumes a circular cone-beam scan and sparse tilted views are a "
+                "rough approximation. Try `--init-method bp` if ASTRA "
                 "rejects this geometry."
             ) from error
         finally:
@@ -294,12 +294,10 @@ def silhouette_from_line_integrals(line_integrals: torch.Tensor, gain: float) ->
     return 1.0 - torch.exp(-float(gain) * torch.clamp(line_integrals, min=0.0))
 
 
-def select_gcp_initialization_view(view_indices: Sequence[int]) -> int:
-    """Return the one view used by the monocular GCP."""
-    flattened = np.asarray(view_indices, dtype=np.int64).reshape(-1)
-    if flattened.size == 0:
-        raise ValueError("At least one view index is required for GCP initialization.")
-    return int(flattened[0])
+def validate_input_view_count(view_indices: Sequence[int]) -> None:
+    """The reconstruction model supports one through seven input views."""
+    if not 1 <= len(view_indices) <= 7:
+        raise ValueError("Reconstruction requires one to seven input views.")
 
 
 def resolve_projection_loss_alpha(
@@ -437,12 +435,15 @@ def predict_gcp_initial_centers(
     selected_cone_vectors: Optional[np.ndarray] = None,
     evaluated_theta_deg: Optional[Sequence[float]] = None,
     evaluated_phi_deg: Optional[Sequence[float]] = None,
+    fusion_grid_size: int = 128,
+    max_centers: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-    """Run the monocular GCP on exactly the first selected Stage-2 view."""
+    """Run one shared GCP per view, lift by pose, and fuse in 3D."""
     # These imports are intentionally lazy: legacy FDK/BP runs should not load
     # the learned initializer or its target-generation helpers.
     from gcp_model import (
         GCPModelConfig,
+        fuse_gcp_centers,
         lift_depth_offsets_to_centers,
         load_gcp_checkpoint,
     )
@@ -451,7 +452,8 @@ def predict_gcp_initial_centers(
         scale_cone_vector_for_detector,
     )
 
-    initialization_view_index = select_gcp_initialization_view(view_indices)
+    selected_indices = validate_view_indices(view_indices, case.num_views)
+    validate_input_view_count(selected_indices)
     checkpoint = Path(checkpoint_path).expanduser().resolve()
     model = load_gcp_checkpoint(checkpoint, device=device)
     loaded_model_config = model.config.to_dict()
@@ -479,27 +481,24 @@ def predict_gcp_initial_centers(
             f"in_channels={model.config.in_channels}."
         )
 
-    image = torch.as_tensor(
-        np.ascontiguousarray(case.images[initialization_view_index]),
+    images = torch.as_tensor(
+        np.ascontiguousarray(case.images[selected_indices]),
         dtype=torch.float32,
         device=device,
-    ).unsqueeze(0).unsqueeze(0)
-    original_detector_shape = tuple(int(value) for value in image.shape[-2:])
+    ).unsqueeze(1)
+    original_detector_shape = tuple(int(value) for value in images.shape[-2:])
     if original_detector_shape != (input_size, input_size):
-        image = F.interpolate(
-            image,
+        images = F.interpolate(
+            images,
             size=(input_size, input_size),
             mode="bilinear",
             align_corners=False,
         )
 
-    prediction = model(image)
+    prediction = model.forward_views(images.unsqueeze(0))
     output_shape = tuple(int(value) for value in prediction["depth"].shape[-2:])
-    selected_indices = validate_view_indices(view_indices, case.num_views)
     if selected_cone_vectors is None:
-        initialization_cone_vector = case.cone_vectors(
-            np.asarray([initialization_view_index], dtype=np.int64)
-        )[0]
+        selected_vectors = case.cone_vectors(selected_indices)
     else:
         selected_vectors = np.asarray(selected_cone_vectors, dtype=np.float32)
         if selected_vectors.shape != (selected_indices.size, 12):
@@ -508,58 +507,77 @@ def predict_gcp_initial_centers(
                 f"shape {(selected_indices.size, 12)}, got "
                 f"{selected_vectors.shape}."
             )
-        initialization_cone_vector = selected_vectors[0]
-    output_cone_vector = scale_cone_vector_for_detector(
-        initialization_cone_vector,
-        original_shape=original_detector_shape,
-        target_shape=output_shape,
-    )
-    entry_zyx, exit_zyx, valid_mask = detector_ray_box_intersections(
-        output_cone_vector,
-        detector_shape=output_shape,
-        volume_extent_m=float(volume_extent_m),
-    )
-    prediction_dtype = prediction["depth"].dtype
-    entry = torch.from_numpy(entry_zyx).to(
-        device=device, dtype=prediction_dtype
-    ).unsqueeze(0)
-    exit = torch.from_numpy(exit_zyx).to(
-        device=device, dtype=prediction_dtype
-    ).unsqueeze(0)
-    centers = lift_depth_offsets_to_centers(
-        prediction, entry, exit, clamp=True
-    )[0]
-    valid = torch.from_numpy(valid_mask.reshape(-1)).to(device=device)
-    centers = centers[valid]
-    if centers.shape[0] == 0:
-        raise RuntimeError(
-            "No rays from the GCP output grid intersect the reconstruction cube. "
-            "Check the projection geometry and --volume-extent-m."
+    ray_boxes = [
+        detector_ray_box_intersections(
+            scale_cone_vector_for_detector(
+                cone_vector,
+                original_shape=original_detector_shape,
+                target_shape=output_shape,
+            ),
+            detector_shape=output_shape,
+            volume_extent_m=float(volume_extent_m),
         )
-
+        for cone_vector in selected_vectors
+    ]
+    prediction_dtype = prediction["depth"].dtype
+    entry = torch.from_numpy(np.stack([box[0] for box in ray_boxes])).to(
+        device=device, dtype=prediction_dtype
+    )
+    exit = torch.from_numpy(np.stack([box[1] for box in ray_boxes])).to(
+        device=device, dtype=prediction_dtype
+    )
+    per_view_centers = lift_depth_offsets_to_centers(
+        {key: value[0] for key, value in prediction.items()}, entry, exit,
+        clamp=True,
+    )
+    centers_by_view = [
+        points[torch.from_numpy(box[2].reshape(-1)).to(device=device)]
+        for points, box in zip(per_view_centers, ray_boxes)
+    ]
+    centers = fuse_gcp_centers(
+        centers_by_view, grid_size=fusion_grid_size, max_centers=max_centers,
+    )
     evaluated_theta = (
-        float(case.theta_deg[initialization_view_index])
+        case.theta_deg[selected_indices]
         if evaluated_theta_deg is None
-        else float(tuple(evaluated_theta_deg)[0])
+        else np.asarray(evaluated_theta_deg, dtype=np.float32)
     )
     evaluated_phi = (
-        float(case.phi_deg[initialization_view_index])
+        case.phi_deg[selected_indices]
         if evaluated_phi_deg is None
-        else float(tuple(evaluated_phi_deg)[0])
+        else np.asarray(evaluated_phi_deg, dtype=np.float32)
     )
+    if len(evaluated_theta) != len(selected_indices) or len(evaluated_phi) != len(selected_indices):
+        raise ValueError("Evaluated view angles must align with view_indices.")
+    per_view_ray_counts = [int(box[2].sum()) for box in ray_boxes]
     metadata = {
         "checkpoint": str(checkpoint),
-        "initialization_view_index": int(initialization_view_index),
-        "initialization_theta_deg": float(case.theta_deg[initialization_view_index]),
-        "initialization_phi_deg": float(case.phi_deg[initialization_view_index]),
-        "evaluated_initialization_theta_deg": evaluated_theta,
-        "evaluated_initialization_phi_deg": evaluated_phi,
+        "initialization_view_index": int(selected_indices[0]),
+        "initialization_view_indices": selected_indices.tolist(),
+        "initialization_theta_deg": float(case.theta_deg[selected_indices[0]]),
+        "initialization_phi_deg": float(case.phi_deg[selected_indices[0]]),
+        "evaluated_initialization_theta_deg": float(evaluated_theta[0]),
+        "evaluated_initialization_phi_deg": float(evaluated_phi[0]),
+        "views": [
+            {
+                "index": int(index),
+                "theta_deg": float(case.theta_deg[index]),
+                "phi_deg": float(case.phi_deg[index]),
+                "evaluated_theta_deg": float(evaluated_theta[position]),
+                "evaluated_phi_deg": float(evaluated_phi[position]),
+                "valid_output_rays": per_view_ray_counts[position],
+            }
+            for position, index in enumerate(selected_indices)
+        ],
         "source_detector_shape": list(original_detector_shape),
         "input_shape": [input_size, input_size],
         "input_resize_mode": "bilinear_align_corners_false",
         "output_grid_shape": list(output_shape),
-        "valid_output_rays": int(valid.sum().item()),
-        "total_output_rays": int(valid.numel()),
+        "valid_output_rays": int(sum(per_view_ray_counts)),
+        "total_output_rays": int(len(selected_indices) * output_shape[0] * output_shape[1]),
+        "fused_center_count": int(centers.shape[0]),
+        "fusion_grid_size": int(fusion_grid_size),
+        "max_centers": max_centers,
         "center_coordinate_order": "normalized_zyx",
         "model_config": loaded_model_config,
         "configured_model_parameters": (
@@ -817,7 +835,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         nargs="+",
         type=int,
         default=[0, 1],
-        help="One or more stored view indices used for reconstruction.",
+        help="One to seven distinct stored view indices used for reconstruction.",
     )
     parser.add_argument(
         "--novel-view-indices",
@@ -877,8 +895,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         default=None,
         help=(
             "Trained monocular Gaussian Center Predictor checkpoint. Required "
-            "when --init-method gcp; only the first --view-indices value is "
-            "used by the predictor."
+            "when --init-method gcp; the shared predictor processes every "
+            "selected view before geometry-aware 3D fusion."
         ),
     )
     parser.add_argument(
@@ -975,6 +993,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     )
     parser.add_argument("--gpu-index", type=int, default=0)
     args = parser.parse_args(argv)
+    try:
+        validate_input_view_count(args.view_indices)
+    except ValueError as error:
+        parser.error(str(error))
+    if len(set(args.view_indices)) != len(args.view_indices):
+        parser.error("--view-indices must be distinct.")
+    if args.volume_size <= 0:
+        parser.error("--volume-size must be positive.")
+    if args.num_init_gaussians <= 0:
+        parser.error("--num-init-gaussians must be positive.")
     if args.expected_gcp_model_config_json is not None:
         try:
             expected_model_config = json.loads(
@@ -1133,6 +1161,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             selected_cone_vectors=cone_vectors,
             evaluated_theta_deg=evaluated_theta_deg,
             evaluated_phi_deg=evaluated_phi_deg,
+            fusion_grid_size=int(args.volume_size),
+            max_centers=int(args.num_init_gaussians),
         )
         if not args.evaluation_cache_only:
             np.save(
@@ -1148,7 +1178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(
             "GCP initialization: "
-            f"view={gcp_metadata['initialization_view_index']} "
+            f"views={gcp_metadata['initialization_view_indices']} "
             f"centers={gaussians.get_gaussians_num} "
             f"checkpoint={gcp_metadata['checkpoint']}"
         )
@@ -1286,6 +1316,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 None
                 if gcp_metadata is None
                 else int(gcp_metadata["initialization_view_index"])
+            ),
+            "gcp_initialization_view_indices": (
+                None
+                if gcp_metadata is None
+                else list(gcp_metadata["initialization_view_indices"])
             ),
             "projection_loss_alpha": float(projection_loss_alpha),
             "iterations_requested": int(args.iterations),
@@ -1468,7 +1503,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else int(len(view_indices))
             ),
             "views": view_direction_records,
-            "gcp_lifting_geometry": "assumed_geometry_first_selected_view",
+            "gcp_lifting_geometry": "assumed_geometry_all_selected_views",
             "gaussian_optimization_geometry": "assumed_geometry_all_selected_views",
             "projection_images_changed": False,
             "novel_view_geometry_changed": False,
@@ -1489,6 +1524,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             None
             if gcp_metadata is None
             else int(gcp_metadata["initialization_view_index"])
+        ),
+        "gcp_initialization_view_indices": (
+            None
+            if gcp_metadata is None
+            else list(gcp_metadata["initialization_view_indices"])
         ),
         "projection_loss_alpha_requested": args.projection_loss_alpha,
         "projection_loss_alpha": float(projection_loss_alpha),

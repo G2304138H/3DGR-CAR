@@ -20,7 +20,7 @@
       "depth_activation": "sigmoid",
       "offset_activation": "bounded_tanh",
       "coordinate_order": "normalized_zyx",
-      "initialization_view": "first_selected_view"
+      "initialization_view": "all_selected_views_voxel_fusion"
     }
   },
   "evaluation_dataset_dir": "/dataset/reny0012/imagecas_autocar_6/stage_2_imagecas_all_branch",

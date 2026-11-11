@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from gcp_dataset import gcp_collate
+from gcp_dataset import gcp_case_collate, gcp_collate
 from gcp_losses import GCPLossWeights
 from gcp_model import (
     GCPModelConfig,
@@ -22,6 +22,7 @@ from train_gcp import (
     _make_grad_scaler,
     load_split_case_names,
     parse_args,
+    run_case_epoch,
     run_epoch,
 )
 
@@ -83,6 +84,21 @@ class SplitParsingTests(unittest.TestCase):
         self.assertEqual(args.fallback_sid_m, 0.9)
         self.assertEqual(args.epochs, 3)
         self.assertFalse(args.amp)
+        self.assertEqual((args.min_input_views, args.max_input_views), (1, 7))
+
+    def test_input_view_bounds_are_configurable_and_validated(self):
+        required = [
+            "--projection-dir", "/projection", "--ground-truth-dir", "/volume",
+            "--split-json", "/split.json", "--output-dir", "/output",
+        ]
+        args = parse_args(required + ["--min-input-views", "2", "--max-input-views", "5"])
+        self.assertEqual((args.min_input_views, args.max_input_views), (2, 5))
+        for lower, upper in ((0, 7), (2, 1), (1, 8)):
+            with self.assertRaises(SystemExit):
+                parse_args(required + [
+                    "--min-input-views", str(lower),
+                    "--max-input-views", str(upper),
+                ])
 
 
 class _TinyGCPDataset(Dataset):
@@ -118,7 +134,54 @@ class _TinyGCPDataset(Dataset):
         }
 
 
+class _TinyCaseDataset(Dataset):
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, index):
+        views = 1 if index == 0 else 3
+        generator = torch.Generator().manual_seed(30 + index)
+        image = torch.rand((views, 1, 16, 16), generator=generator)
+        volume = torch.zeros((1, 5, 5, 5), dtype=torch.float32)
+        volume[:, 1:4, 2, 2] = 1.0
+        depth = torch.full((views, 1, 8, 8), 0.5)
+        entry = torch.zeros((views, 8, 8, 3))
+        exit = torch.ones((views, 8, 8, 3))
+        return {
+            "image": image, "volume": volume,
+            "point_cloud": torch.tensor([[0.25, 0.5, 0.5], [0.75, 0.5, 0.5]]),
+            "depth": depth, "depth_mask": torch.ones_like(depth, dtype=torch.bool),
+            "ray_valid_mask": torch.ones_like(depth, dtype=torch.bool),
+            "ray_entry_zyx": entry, "ray_exit_zyx": exit,
+            "view_indices": list(range(views)), "case_name": f"case_{index}",
+        }
+
+
 class TrainingLoopTests(unittest.TestCase):
+    def test_variable_view_case_batch_updates_model_once(self):
+        torch.manual_seed(4)
+        model = MonocularGaussianCenterPredictor(
+            GCPModelConfig(
+                image_size=16, base_channels=2, num_levels=2,
+                alpha=2, norm_groups=1,
+            )
+        )
+        optimizer = torch.optim.Adam(model.parameters(), lr=1.0e-3)
+        loader = DataLoader(
+            _TinyCaseDataset(), batch_size=2, shuffle=False,
+            collate_fn=gcp_case_collate,
+        )
+        before = model.prediction_head.weight.detach().clone()
+        metrics = run_case_epoch(
+            model, loader, torch.device("cpu"), GCPLossWeights(),
+            volume_size=5, max_predicted_centers=16,
+            optimizer=optimizer, scaler=_make_grad_scaler(False),
+            chamfer_chunk_size=16, skeleton_iterations=1,
+        )
+        self.assertEqual(metrics["mean_input_views"], 2.0)
+        self.assertTrue(all(torch.isfinite(torch.tensor(v)) for v in metrics.values()))
+        self.assertFalse(torch.equal(before, model.prediction_head.weight.detach()))
+
     def test_one_cpu_optimizer_step_returns_finite_metrics(self):
         torch.manual_seed(4)
         model = MonocularGaussianCenterPredictor(

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Monocular GCP training for the ImageCAS LCA projections.",
+  "description": "Variable-view GCP training for the ImageCAS LCA projections.",
   "training": {
     "projection_dir": "/dataset/reny0012/vessel_code_stage_2_lca_paired/anchors",
     "ground_truth_dir": "/dataset/reny0012/imagecas_voxel",
@@ -21,6 +21,9 @@
     "norm_groups": 8,
     "dropout": 0.0,
     "max_points": 10000,
+    "min_input_views": 1,
+    "max_input_views": 7,
+    "max_predicted_centers": 10000,
     "epochs": 100,
     "batch_size": 1,
     "num_workers": 2,

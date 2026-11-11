@@ -1,16 +1,22 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from gaussian_model_anisotropic import GaussianModelAnisotropic
+from gcp_losses import trilinear_point_splat
+from gcp_model import GCPModelConfig, MonocularGaussianCenterPredictor, fuse_gcp_centers, make_gcp_checkpoint
+from stage2_npz_data import Stage2ProjectionCase
 from train_stage2_npz import (
     build_centerline_skeleton_masks,
     parse_args,
+    predict_gcp_initial_centers,
     projection_reconstruction_loss,
     resolve_projection_loss_alpha,
-    select_gcp_initialization_view,
 )
 
 
@@ -74,11 +80,77 @@ class Stage2GCPHelperTests(unittest.TestCase):
         self.assertEqual(args.view_direction_theta_change_deg, 5.0)
         self.assertEqual(args.view_direction_phi_change_deg, -2.5)
 
-    def test_monocular_initializer_selects_exactly_first_requested_view(self):
-        self.assertEqual(select_gcp_initialization_view([3, 5]), 3)
-        self.assertEqual(select_gcp_initialization_view([6, 0, 4]), 6)
-        with self.assertRaises(ValueError):
-            select_gcp_initialization_view([])
+    def test_input_view_count_is_bounded(self):
+        for count in (1, 2, 7):
+            args, _ = parse_args(
+                ["--input", "case.npz", "--output-dir", "output", "--view-indices"]
+                + [str(index) for index in range(count)]
+            )
+            self.assertEqual(len(args.view_indices), count)
+        for count in (0, 8):
+            with self.assertRaises(SystemExit):
+                parse_args(
+                    ["--input", "case.npz", "--output-dir", "output", "--view-indices"]
+                    + [str(index) for index in range(count)]
+                )
+
+    def test_multiview_fusion_merges_same_voxel_and_keeps_single_view(self):
+        first = torch.tensor([[0.25, 0.35, 0.45], [0.70, 0.80, 0.90]])
+        second = torch.tensor([[0.26, 0.36, 0.46]])
+        torch.testing.assert_close(fuse_gcp_centers([first], 16), first)
+        fused = fuse_gcp_centers([first, second], 16)
+        self.assertEqual(fused.shape, (2, 3))
+        torch.testing.assert_close(
+            fused, fuse_gcp_centers([second, first], 16)
+        )
+        self.assertEqual(fuse_gcp_centers([first, second], 16, max_centers=1).shape, (1, 3))
+        torch.testing.assert_close(
+            fuse_gcp_centers([first, second], 16, max_centers=1),
+            fuse_gcp_centers([second, first], 16, max_centers=1),
+        )
+
+    def test_gcp_initialization_lifts_one_two_and_seven_views(self):
+        config = GCPModelConfig(
+            image_size=32, base_channels=4, num_levels=2,
+            alpha=2, norm_groups=2,
+        )
+        model = MonocularGaussianCenterPredictor(config).eval()
+        angles = np.linspace(0.0, 120.0, 7, dtype=np.float32)
+        case = Stage2ProjectionCase(
+            path=Path("case.npz"), sample_name="case",
+            images=np.ones((7, 32, 32), dtype=np.float32),
+            theta_deg=angles, phi_deg=np.full(7, 90.0, dtype=np.float32),
+            sid_m=0.9, source_origin_distance_m=0.75,
+            detector_origin_distance_m=0.15,
+            detector_pixel_spacing_m=0.001,
+            clinical_views=np.asarray([f"view_{i}" for i in range(7)]),
+            projection_center_offset_m=None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "gcp.pt"
+            torch.save(make_gcp_checkpoint(model), checkpoint)
+            for count in (1, 2, 7):
+                centers, metadata = predict_gcp_initial_centers(
+                    checkpoint_path=checkpoint,
+                    case=case,
+                    view_indices=list(range(count)),
+                    volume_extent_m=0.03,
+                    device=torch.device("cpu"),
+                    fusion_grid_size=32,
+                    max_centers=300,
+                )
+                self.assertEqual(metadata["initialization_view_indices"], list(range(count)))
+                self.assertEqual(len(metadata["views"]), count)
+                self.assertEqual(metadata["fused_center_count"], len(centers))
+                self.assertGreater(len(centers), 0)
+                self.assertLessEqual(len(centers), 300)
+                self.assertTrue(bool(((centers >= 0) & (centers <= 1)).all()))
+                if count == 1:
+                    volume = trilinear_point_splat(
+                        centers.unsqueeze(0), (16, 16, 16), saturate=False,
+                    )
+                    self.assertEqual(volume.shape, (1, 1, 16, 16, 16))
+                    self.assertGreater(int(torch.count_nonzero(volume)), 0)
 
     def test_projection_loss_defaults_preserve_legacy_baselines(self):
         self.assertEqual(resolve_projection_loss_alpha("fdk", None), 1.0)
